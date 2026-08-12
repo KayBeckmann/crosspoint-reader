@@ -336,7 +336,13 @@ void setup() {
       powerManager.startDeepSleep(gpio);
       break;
     case HalGPIO::WakeupReason::AfterFlash:
-      // After flashing, just proceed to boot
+      // A flashed firmware may inherit /.crosspoint/state.json from a prior
+      // quick-resume/custom-sleep session with showBootScreen=false. Treat
+      // post-flash boot as a real splash boot so branding/upgrade feedback is
+      // visible instead of falling into SplashlessWake.
+      APP_STATE.showBootScreen = true;
+      APP_STATE.saveToFile();
+      break;
     case HalGPIO::WakeupReason::Other:
     default:
       break;
