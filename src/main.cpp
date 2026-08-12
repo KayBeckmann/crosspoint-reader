@@ -374,10 +374,20 @@ void setup() {
   // skips the panel-clearing pass and the X3 initial-full-sync arming (see
   // HalDisplay::begin), so the first paint is FAST_REFRESH (~500ms) over the
   // retained frame and input dispatches against a visible UI.
-  const BootResume resume = isSilentReboot              ? BootResume::Silent
-                            : !APP_STATE.showBootScreen ? BootResume::SplashlessWake
-                                                        : BootResume::Splash;
+  const bool hasSleepFrame = Storage.exists(SLEEP_FRAME_FILE);
+  const bool canSplashlessWake = !APP_STATE.showBootScreen && hasSleepFrame;
+  const BootResume resume = isSilentReboot          ? BootResume::Silent
+                            : canSplashlessWake     ? BootResume::SplashlessWake
+                                                    : BootResume::Splash;
   bool allowFastInitialReaderRefresh = false;
+
+  if (!APP_STATE.showBootScreen && !hasSleepFrame) {
+    // A stale state.json from quick-resume/custom-sleep must not suppress the
+    // boot splash when there is no retained frame to show. Re-arm persistently
+    // before rendering so future boots recover even if something resets early.
+    APP_STATE.showBootScreen = true;
+    APP_STATE.saveToFile();
+  }
 
   setupDisplayAndFonts(resume != BootResume::Splash);
 
