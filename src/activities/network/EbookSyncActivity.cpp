@@ -10,6 +10,7 @@
 #include <WiFi.h>
 
 #include <cctype>
+#include <cstring>
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
@@ -32,7 +33,13 @@ std::string extensionOf(const std::string& path) {
   const auto slash = path.find_last_of('/');
   const auto dot = path.find_last_of('.');
   if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) return "";
-  return path.substr(dot);
+  std::string ext = path.substr(dot);
+  for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return ext;
+}
+
+bool isImageCoverExtension(const std::string& ext) {
+  return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
 }
 }  // namespace
 
@@ -84,7 +91,8 @@ void EbookSyncActivity::onWifiSelectionComplete(const bool success) {
     selectedIndex_ = 0;
     statusMessage_.clear();
   }
-  requestUpdate();
+  requestUpdateAndWait();
+  syncAllNew();
 }
 
 std::string EbookSyncActivity::urlEncode(const std::string& value) {
@@ -154,15 +162,30 @@ bool EbookSyncActivity::fetchAndParseList() {
     const char* path = obj["path"] | "";
     const char* filename = obj["filename"] | "";
     if (path[0] == '\0') continue;
+    if (!isSupportedSyncAsset(path)) continue;
 
     EbookEntry entry;
     entry.path = path;
     entry.filename = filename[0] != '\0' ? filename : path;
     entry.filename = ensureExtensionPreserved(entry.filename, entry.path);
     entry.localPath = std::string(DOWNLOAD_DIR) + "/" + entry.filename;
+    entry.isCover = isImageCoverExtension(extensionOf(entry.path));
     entry.exists = Storage.exists(entry.localPath.c_str());
     if (entry.exists) skippedExisting_++;
     entries_.push_back(std::move(entry));
+
+    const char* coverPath = obj["coverPath"] | obj["cover"] | "";
+    if (coverPath[0] == '\0' || !isSupportedSyncAsset(coverPath)) continue;
+    EbookEntry cover;
+    const char* coverFilename = obj["coverFilename"] | obj["coverName"] | "";
+    cover.path = coverPath;
+    cover.filename = coverFilename[0] != '\0' ? coverFilename : coverPath;
+    cover.filename = ensureExtensionPreserved(cover.filename, cover.path);
+    cover.localPath = std::string(DOWNLOAD_DIR) + "/" + cover.filename;
+    cover.isCover = true;
+    cover.exists = Storage.exists(cover.localPath.c_str());
+    if (cover.exists) skippedExisting_++;
+    entries_.push_back(std::move(cover));
   }
 
   LOG_DBG(TAG, "Loaded %zu eBook entries", entries_.size());
@@ -219,6 +242,11 @@ bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
 
   entry.exists = true;
   return true;
+}
+
+bool EbookSyncActivity::isSupportedSyncAsset(const std::string& path) const {
+  const std::string ext = extensionOf(path);
+  return ext == ".epub" || isImageCoverExtension(ext);
 }
 
 bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::string& filename) {
