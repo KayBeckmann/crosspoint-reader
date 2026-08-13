@@ -300,7 +300,7 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   client.setInsecure();
   HTTPClient http;
   const std::string url =
-      std::string(X4_NOTES_UPLOAD_URL) + "?folder=" + urlEncode("01_X4") + "&filename=" + urlEncode(filename);
+      std::string(X4_NOTES_UPLOAD_URL) + "?source=" + urlEncode("01_X4") + "&filename=" + urlEncode(filename);
   if (!http.begin(client, url.c_str())) return false;
   http.addHeader("Content-Type", "text/markdown; charset=utf-8");
   http.addHeader("X-X4-Note-Filename", filename.c_str());
