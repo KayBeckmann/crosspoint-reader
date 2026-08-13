@@ -1,5 +1,6 @@
 #include "BluetoothPairingActivity.h"
 
+#include <Arduino.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -15,12 +16,19 @@
 
 namespace {
 constexpr unsigned long SCAN_MS = 8000;
+constexpr unsigned long DEFER_BLE_START_MS = 500;
+constexpr size_t BLE_START_MIN_FREE_HEAP = 72 * 1024;
+constexpr size_t BLE_START_MIN_MAX_ALLOC = 24 * 1024;
 constexpr const char* TAG = "BT_PAIR";
 }  // namespace
 
 void BluetoothPairingActivity::onEnter() {
   Activity::onEnter();
-  startScan();
+  state_ = State::Starting;
+  scanStarted_ = false;
+  enteredMs_ = millis();
+  status_ = tr(STR_BLUETOOTH_SCANNING);
+  error_.clear();
   requestUpdate();
 }
 
@@ -33,11 +41,30 @@ void BluetoothPairingActivity::onExit() {
   powerLock_.reset();
 }
 
+bool BluetoothPairingActivity::hasBleStartHeadroom() const {
+  const size_t freeHeap = ESP.getFreeHeap();
+  const size_t maxAlloc = ESP.getMaxAllocHeap();
+  if (freeHeap < BLE_START_MIN_FREE_HEAP || maxAlloc < BLE_START_MIN_MAX_ALLOC) {
+    LOG_ERR(TAG, "Insufficient heap for BLE start: free=%u max=%u need free=%u max=%u", static_cast<unsigned>(freeHeap),
+            static_cast<unsigned>(maxAlloc), static_cast<unsigned>(BLE_START_MIN_FREE_HEAP),
+            static_cast<unsigned>(BLE_START_MIN_MAX_ALLOC));
+    return false;
+  }
+  return true;
+}
+
 void BluetoothPairingActivity::startScan() {
+  scanStarted_ = true;
   selectedIndex_ = 0;
   lastCount_ = 0;
   error_.clear();
   status_ = tr(STR_BLUETOOTH_SCANNING);
+  state_ = State::Starting;
+  if (!hasBleStartHeadroom()) {
+    state_ = State::Error;
+    error_ = tr(STR_MEMORY_ERROR);
+    return;
+  }
   if (!powerLock_) {
     powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
     if (!powerLock_) {
@@ -49,7 +76,12 @@ void BluetoothPairingActivity::startScan() {
   if (WiFi.getMode() != WIFI_MODE_NULL) {
     WiFi.disconnect(true);
     WiFi.mode(WIFI_OFF);
-    delay(80);
+    delay(200);
+  }
+  if (!hasBleStartHeadroom()) {
+    state_ = State::Error;
+    error_ = tr(STR_MEMORY_ERROR);
+    return;
   }
   if (!BleHid.begin("CrossPoint X4")) {
     state_ = State::Error;
@@ -68,6 +100,7 @@ void BluetoothPairingActivity::startScan() {
     return;
   }
   scanStartedMs_ = millis();
+  lastScanUpdateMs_ = 0;
   state_ = State::Scanning;
 }
 
@@ -109,7 +142,13 @@ void BluetoothPairingActivity::connectSelected() {
 }
 
 void BluetoothPairingActivity::loop() {
-  BleHid.poll();
+  if (state_ == State::Starting && !scanStarted_ && millis() - enteredMs_ >= DEFER_BLE_START_MS) {
+    startScan();
+    requestUpdate();
+    return;
+  }
+
+  if (BleHid.isRunning()) BleHid.poll();
 
   if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
     if (state_ == State::Scanning && BleHid.isScanning()) BleHid.stopScan();
