@@ -2,6 +2,9 @@
 
 #include <GfxRenderer.h>
 #include <I18n.h>
+#include <Logging.h>
+#include <Memory.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -12,7 +15,8 @@
 
 namespace {
 constexpr unsigned long SCAN_MS = 8000;
-}
+constexpr const char* TAG = "BT_PAIR";
+}  // namespace
 
 void BluetoothPairingActivity::onEnter() {
   Activity::onEnter();
@@ -24,7 +28,9 @@ void BluetoothPairingActivity::onExit() {
   Activity::onExit();
   if (BleHid.isRunning() && !BleHid.isConnected()) {
     BleHid.stopScan();
+    BleHid.end();
   }
+  powerLock_.reset();
 }
 
 void BluetoothPairingActivity::startScan() {
@@ -32,13 +38,35 @@ void BluetoothPairingActivity::startScan() {
   lastCount_ = 0;
   error_.clear();
   status_ = tr(STR_BLUETOOTH_SCANNING);
+  if (!powerLock_) {
+    powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
+    if (!powerLock_) {
+      state_ = State::Error;
+      error_ = tr(STR_MEMORY_ERROR);
+      return;
+    }
+  }
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(80);
+  }
   if (!BleHid.begin("CrossPoint X4")) {
     state_ = State::Error;
     error_ = tr(STR_BLUETOOTH_UNAVAILABLE);
+    LOG_ERR(TAG, "BLE HID host begin failed");
     return;
   }
   BleHid.releaseScanResults();
   BleHid.startScan(SCAN_MS);
+  delay(20);
+  BleHid.poll();
+  if (!BleHid.isScanning()) {
+    state_ = State::Error;
+    error_ = tr(STR_BLUETOOTH_SCAN_FAILED);
+    LOG_ERR(TAG, "BLE scan did not start");
+    return;
+  }
   scanStartedMs_ = millis();
   state_ = State::Scanning;
 }
@@ -99,8 +127,10 @@ void BluetoothPairingActivity::loop() {
       requestUpdate();
     });
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (BleHid.deviceCount() == 0 && !BleHid.isScanning()) startScan();
-      else connectSelected();
+      if (BleHid.deviceCount() == 0 && !BleHid.isScanning())
+        startScan();
+      else
+        connectSelected();
     }
     return;
   }
@@ -129,8 +159,10 @@ void BluetoothPairingActivity::loop() {
 
   if (state_ == State::Connected || state_ == State::Error) {
     if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-      if (state_ == State::Error) startScan();
-      else finish();
+      if (state_ == State::Error)
+        startScan();
+      else
+        finish();
     }
   }
 }
@@ -144,13 +176,13 @@ void BluetoothPairingActivity::render(RenderLock&&) {
                  CROSSPOINT_VERSION);
 
   const int listTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
-  GUI.drawList(renderer,
-               Rect{0, listTop, width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing},
-               itemCount(), selectedIndex_, [this](int i) { return itemLabel(i); }, nullptr, nullptr, nullptr, true);
+  GUI.drawList(
+      renderer, Rect{0, listTop, width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing},
+      itemCount(), selectedIndex_, [this](int i) { return itemLabel(i); }, nullptr, nullptr, nullptr, true);
 
   const char* confirm = state_ == State::Connected ? tr(STR_OK)
-                        : state_ == State::Error ? tr(STR_RETRY)
-                                                 : tr(STR_SELECT);
+                        : state_ == State::Error   ? tr(STR_RETRY)
+                                                   : tr(STR_SELECT);
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), confirm, tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();

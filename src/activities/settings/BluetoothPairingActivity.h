@@ -1,6 +1,9 @@
 #pragma once
 
 #include <BleKeyboardHost.h>
+#include <HalPowerManager.h>
+
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -27,6 +30,7 @@ class BluetoothPairingActivity final : public Activity {
   int selectedIndex_ = 0;
   std::string status_;
   std::string error_;
+  std::unique_ptr<HalPowerManager::Lock> powerLock_;
   unsigned long scanStartedMs_ = 0;
   uint8_t lastCount_ = 0;
 

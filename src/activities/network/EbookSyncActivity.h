@@ -45,6 +45,7 @@ class EbookSyncActivity : public Activity {
     std::string path;
     std::string filename;
     std::string localPath;
+    bool isCover = false;
     bool exists = false;
   };
 
@@ -67,6 +68,7 @@ class EbookSyncActivity : public Activity {
   bool fetchAndParseList();
   void syncAllNew();
   bool downloadEntry(EbookEntry& entry);
+  bool isSupportedSyncAsset(const std::string& path) const;
   bool uploadPendingNotes();
   bool uploadNoteFile(const std::string& path, const std::string& filename);
   int listItemCount() const;
