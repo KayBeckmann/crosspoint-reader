@@ -87,6 +87,16 @@ std::string BluetoothPairingActivity::itemLabel(int index) const {
   return buf;
 }
 
+std::string BluetoothPairingActivity::scanStatus() const {
+  if (state_ != State::Scanning) return status_;
+  const unsigned long elapsed = millis() - scanStartedMs_;
+  const unsigned long remaining = elapsed < SCAN_MS ? (SCAN_MS - elapsed + 999) / 1000 : 0;
+  char buf[80];
+  snprintf(buf, sizeof(buf), "%s %u (%lus)", tr(STR_BLUETOOTH_SCANNING), static_cast<unsigned>(BleHid.deviceCount()),
+           remaining);
+  return buf;
+}
+
 void BluetoothPairingActivity::connectSelected() {
   if (state_ != State::Scanning || BleHid.deviceCount() == 0) return;
   selectedIndex_ = std::min<int>(selectedIndex_, BleHid.deviceCount() - 1);
@@ -112,6 +122,10 @@ void BluetoothPairingActivity::loop() {
     if (count != lastCount_) {
       lastCount_ = count;
       selectedIndex_ = std::min<int>(selectedIndex_, std::max<int>(0, count - 1));
+      requestUpdate();
+    }
+    if (millis() - lastScanUpdateMs_ > 1000) {
+      lastScanUpdateMs_ = millis();
       requestUpdate();
     }
     if (!BleHid.isScanning() || millis() - scanStartedMs_ > SCAN_MS + 500) {
@@ -176,8 +190,14 @@ void BluetoothPairingActivity::render(RenderLock&&) {
                  CROSSPOINT_VERSION);
 
   const int listTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
+  if (state_ == State::Scanning) {
+    renderer.drawCenteredText(UI_10_FONT_ID, listTop, scanStatus().c_str());
+  }
   GUI.drawList(
-      renderer, Rect{0, listTop, width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing},
+      renderer,
+      Rect{0,
+           listTop + (state_ == State::Scanning ? renderer.getLineHeight(UI_10_FONT_ID) + metrics.verticalSpacing : 0),
+           width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing},
       itemCount(), selectedIndex_, [this](int i) { return itemLabel(i); }, nullptr, nullptr, nullptr, true);
 
   const char* confirm = state_ == State::Connected ? tr(STR_OK)

@@ -37,6 +37,18 @@ def patch_nimble_for_crosspoint_ble_hid():
     if disable_entire_c_file(npl, "CrossPoint: ESP-IDF core already provides NimBLE FreeRTOS NPL symbols"):
         print("Patched duplicate NimBLE-Arduino FreeRTOS NPL out")
 
+    # CrossPoint keeps FreeInk SDK as a clean submodule. Runtime HID host fixes
+    # that are needed by Kay's X4 firmware are applied to the symlinked SDK source
+    # during the PlatformIO build, so the main repo remains self-contained.
+    host = project_dir / "freeink-sdk/libs/network/BleKeyboardHost/src/BleKeyboardHost.cpp"
+    if patch_file(host, [
+        (
+            "  if (!addr) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
+            "  if (!addr) return;\n  if (!connectable && !hid) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
+        )
+    ]):
+        print("Patched BLE HID scanner to keep connectable unnamed devices")
+
     # The X4 BLE keyboard host only needs normal HID scanning/connection. Periodic
     # advertising sync is unused and does not build cleanly against the current
     # pioarduino NimBLE port headers.

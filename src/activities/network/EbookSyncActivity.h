@@ -58,6 +58,8 @@ class EbookSyncActivity : public Activity {
   size_t skippedExisting_ = 0;
   size_t fileProgress_ = 0;
   size_t fileTotal_ = 0;
+  unsigned long operationStartedMs_ = 0;
+  unsigned long lastHeartbeatMs_ = 0;
   size_t uploadedNotes_ = 0;
   size_t deletedNotes_ = 0;
   std::string statusMessage_;
@@ -65,6 +67,8 @@ class EbookSyncActivity : public Activity {
   bool cancelRequested_ = false;
 
   void onWifiSelectionComplete(bool success);
+  void updateHeartbeat(const char* message = nullptr, bool force = false);
+  std::string progressDetail() const;
   bool fetchAndParseList();
   void syncAllNew();
   bool downloadEntry(EbookEntry& entry);

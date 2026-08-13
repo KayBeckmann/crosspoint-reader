@@ -27,7 +27,8 @@ constexpr const char* DOWNLOAD_DIR = "/Download";
 constexpr const char* NOTES_DIR = "/Notes";
 constexpr size_t MAX_LOCAL_NAME_BYTES = 100;
 constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
-constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 5000;
+constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1500;
+constexpr unsigned long HEARTBEAT_UPDATE_MS = 1500;
 
 std::string extensionOf(const std::string& path) {
   const auto slash = path.find_last_of('/');
@@ -76,6 +77,8 @@ void EbookSyncActivity::onWifiSelectionComplete(const bool success) {
     state_ = LOADING_LIST;
     statusMessage_ = tr(STR_EBOOK_SYNC_LOADING);
     errorMessage_.clear();
+    operationStartedMs_ = millis();
+    lastHeartbeatMs_ = 0;
   }
   requestUpdateAndWait();
 
@@ -93,6 +96,29 @@ void EbookSyncActivity::onWifiSelectionComplete(const bool success) {
   }
   requestUpdateAndWait();
   syncAllNew();
+}
+
+void EbookSyncActivity::updateHeartbeat(const char* message, const bool force) {
+  const unsigned long now = millis();
+  if (!force && now - lastHeartbeatMs_ < HEARTBEAT_UPDATE_MS) return;
+  lastHeartbeatMs_ = now;
+  if (message) statusMessage_ = message;
+  requestUpdate(true);
+}
+
+std::string EbookSyncActivity::progressDetail() const {
+  char buf[96];
+  const unsigned long seconds = operationStartedMs_ == 0 ? 0 : (millis() - operationStartedMs_) / 1000;
+  if (fileTotal_ > 0) {
+    snprintf(buf, sizeof(buf), "%u/%u KB · %lus", static_cast<unsigned>(fileProgress_ / 1024),
+             static_cast<unsigned>(fileTotal_ / 1024), static_cast<unsigned long>(seconds));
+  } else if (fileProgress_ > 0) {
+    snprintf(buf, sizeof(buf), "%u KB · %lus", static_cast<unsigned>(fileProgress_ / 1024),
+             static_cast<unsigned long>(seconds));
+  } else {
+    snprintf(buf, sizeof(buf), "%lus", static_cast<unsigned long>(seconds));
+  }
+  return buf;
 }
 
 std::string EbookSyncActivity::urlEncode(const std::string& value) {
@@ -129,7 +155,15 @@ bool EbookSyncActivity::fetchAndParseList() {
   entries_.clear();
   Storage.remove(LIST_TMP);
 
-  const auto result = HttpDownloader::downloadToFile(X4_EBOOKS_LIST_URL, LIST_TMP, nullptr);
+  fileProgress_ = 0;
+  fileTotal_ = 0;
+  updateHeartbeat(tr(STR_EBOOK_SYNC_LOADING), true);
+  const auto result =
+      HttpDownloader::downloadToFile(X4_EBOOKS_LIST_URL, LIST_TMP, [this](size_t downloaded, size_t total) {
+        fileProgress_ = downloaded;
+        fileTotal_ = total;
+        updateHeartbeat();
+      });
   if (result != HttpDownloader::OK) {
     LOG_ERR(TAG, "Failed to fetch eBook list (%d)", static_cast<int>(result));
     errorMessage_ = tr(STR_EBOOK_SYNC_LIST_FAILED);
@@ -189,6 +223,7 @@ bool EbookSyncActivity::fetchAndParseList() {
   }
 
   LOG_DBG(TAG, "Loaded %zu eBook entries", entries_.size());
+  updateHeartbeat(tr(STR_EBOOK_SYNC_PARSING), true);
   uploadPendingNotes();
   return true;
 }
@@ -208,6 +243,10 @@ bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
   unsigned long lastProgressUpdateMs = 0;
   fileProgress_ = 0;
   fileTotal_ = 0;
+  operationStartedMs_ = millis();
+  lastHeartbeatMs_ = 0;
+  statusMessage_ = entry.filename;
+  updateHeartbeat(nullptr, true);
 
   const auto result = HttpDownloader::downloadToFile(
       url, entry.localPath,
@@ -226,7 +265,7 @@ bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
             now - lastProgressUpdateMs >= DOWNLOAD_PROGRESS_MIN_UPDATE_MS) {
           lastRenderedPercent = percent;
           lastProgressUpdateMs = now;
-          requestUpdate(true);
+          updateHeartbeat();
         }
       },
       &cancelRequested_);
@@ -287,7 +326,10 @@ bool EbookSyncActivity::uploadPendingNotes() {
     if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".md") continue;
     const std::string path = std::string(NOTES_DIR) + "/" + filename;
     statusMessage_ = std::string(tr(STR_NOTE_SYNC_UPLOADING)) + " " + filename;
-    requestUpdate(true);
+    fileProgress_ = 0;
+    fileTotal_ = 0;
+    operationStartedMs_ = millis();
+    updateHeartbeat(nullptr, true);
     if (uploadNoteFile(path, filename)) {
       uploadedNotes_++;
       if (Storage.remove(path.c_str()))
@@ -311,12 +353,16 @@ void EbookSyncActivity::syncAllNew() {
     newDownloads_ = 0;
     fileProgress_ = 0;
     fileTotal_ = 0;
+    operationStartedMs_ = millis();
+    lastHeartbeatMs_ = 0;
   }
   requestUpdateAndWait();
 
   for (size_t i = 0; i < entries_.size(); ++i) {
     currentIndex_ = i;
     if (entries_[i].exists) continue;
+    statusMessage_ = entries_[i].filename;
+    updateHeartbeat(nullptr, true);
     if (!downloadEntry(entries_[i])) {
       RenderLock lock(*this);
       state_ = cancelRequested_ ? READY : ERROR;
@@ -422,8 +468,9 @@ void EbookSyncActivity::render(RenderLock&&) {
   const auto centerY = (pageHeight - lineHeight) / 2;
 
   if (state_ == LOADING_LIST || state_ == WIFI_SELECTION) {
-    renderer.drawCenteredText(UI_10_FONT_ID, centerY,
+    renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight,
                               statusMessage_.empty() ? tr(STR_EBOOK_SYNC_LOADING) : statusMessage_.c_str());
+    renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing, progressDetail().c_str());
     GUI.drawButtonHints(renderer, tr(STR_BACK), "", "", "");
   } else if (state_ == READY) {
     GUI.drawList(
@@ -447,9 +494,14 @@ void EbookSyncActivity::render(RenderLock&&) {
         });
     GUI.drawButtonHints(renderer, tr(STR_BACK), tr(STR_DOWNLOAD), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   } else if (state_ == SYNCING) {
-    const std::string title = currentIndex_ < entries_.size() ? entries_[currentIndex_].filename : tr(STR_DOWNLOADING);
-    renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight, title.c_str());
-    const int percent = fileTotal_ > 0 ? static_cast<int>(static_cast<uint64_t>(fileProgress_) * 100 / fileTotal_) : 0;
+    const std::string title =
+        statusMessage_.empty()
+            ? (currentIndex_ < entries_.size() ? entries_[currentIndex_].filename : tr(STR_DOWNLOADING))
+            : statusMessage_;
+    renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight * 2, title.c_str());
+    renderer.drawCenteredText(UI_10_FONT_ID, centerY - metrics.verticalSpacing, progressDetail().c_str());
+    const int percent = fileTotal_ > 0 ? static_cast<int>(static_cast<uint64_t>(fileProgress_) * 100 / fileTotal_)
+                                       : static_cast<int>(((millis() / HEARTBEAT_UPDATE_MS) % 20) * 5);
     GUI.drawProgressBar(renderer,
                         Rect{metrics.contentSidePadding, centerY + metrics.verticalSpacing,
                              pageWidth - metrics.contentSidePadding * 2, metrics.progressBarHeight},

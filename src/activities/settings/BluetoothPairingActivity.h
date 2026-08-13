@@ -32,10 +32,12 @@ class BluetoothPairingActivity final : public Activity {
   std::string error_;
   std::unique_ptr<HalPowerManager::Lock> powerLock_;
   unsigned long scanStartedMs_ = 0;
+  unsigned long lastScanUpdateMs_ = 0;
   uint8_t lastCount_ = 0;
 
   int itemCount() const;
   void startScan();
   void connectSelected();
   std::string itemLabel(int index) const;
+  std::string scanStatus() const;
 };

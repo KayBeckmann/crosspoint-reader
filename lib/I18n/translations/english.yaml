@@ -214,6 +214,7 @@ STR_RESTARTING_HINT: "Restarting... If device does not restart, hold the power b
 STR_NO_ENTRIES: "No entries found"
 STR_DOWNLOADING: "Downloading..."
 STR_DOWNLOAD_FAILED: "Download failed"
+STR_EBOOK_SYNC_PARSING: "Checking sync list..."
 STR_EBOOK_SYNC_LOADING: "Loading eBooks..."
 STR_EBOOK_SYNC_ALL_NEW: "Sync new eBooks/covers"
 STR_EBOOK_SYNC_NEW_COUNT: "new item(s)"
