@@ -14,6 +14,10 @@
 #define X4_EBOOKS_DOWNLOAD_URL "https://n8n.beckmann-md.de/webhook/x4-ebooks-download"
 #endif
 
+#ifndef X4_EBOOKS_ACK_URL
+#define X4_EBOOKS_ACK_URL "https://n8n.beckmann-md.de/webhook/x4-ebooks-ack"
+#endif
+
 #ifndef X4_NOTES_UPLOAD_URL
 #define X4_NOTES_UPLOAD_URL "https://n8n.beckmann-md.de/webhook/x4-notes-upload"
 #endif
@@ -55,6 +59,7 @@ class EbookSyncActivity : public Activity {
   int selectedIndex_ = 0;
   size_t currentIndex_ = 0;
   size_t newDownloads_ = 0;
+  size_t ackedDownloads_ = 0;
   size_t skippedExisting_ = 0;
   size_t fileProgress_ = 0;
   size_t fileTotal_ = 0;
@@ -72,6 +77,7 @@ class EbookSyncActivity : public Activity {
   bool fetchAndParseList();
   void syncAllNew();
   bool downloadEntry(EbookEntry& entry);
+  bool acknowledgeDownload(const EbookEntry& entry);
   bool isSupportedSyncAsset(const std::string& path) const;
   bool uploadPendingNotes();
   bool uploadNoteFile(const std::string& path, const std::string& filename);

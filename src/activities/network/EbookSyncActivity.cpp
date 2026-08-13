@@ -280,7 +280,26 @@ bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
   }
 
   entry.exists = true;
+  if (acknowledgeDownload(entry)) {
+    ackedDownloads_++;
+  } else {
+    LOG_ERR(TAG, "Download ACK failed: %s", entry.path.c_str());
+  }
   return true;
+}
+
+bool EbookSyncActivity::acknowledgeDownload(const EbookEntry& entry) {
+  NetworkClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  const std::string url = std::string(X4_EBOOKS_ACK_URL) + "?file=" + urlEncode(entry.path) +
+                          "&filename=" + urlEncode(entry.filename) + "&local=" + urlEncode(entry.localPath) +
+                          "&type=" + (entry.isCover ? "cover" : "ebook");
+  if (!http.begin(client, url.c_str())) return false;
+  http.addHeader("User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
+  const int code = http.POST(reinterpret_cast<uint8_t*>(const_cast<char*>("ok")), 2);
+  http.end();
+  return code >= 200 && code < 300;
 }
 
 bool EbookSyncActivity::isSupportedSyncAsset(const std::string& path) const {
@@ -351,6 +370,7 @@ void EbookSyncActivity::syncAllNew() {
     cancelRequested_ = false;
     currentIndex_ = 0;
     newDownloads_ = 0;
+    ackedDownloads_ = 0;
     fileProgress_ = 0;
     fileTotal_ = 0;
     operationStartedMs_ = millis();
@@ -360,7 +380,13 @@ void EbookSyncActivity::syncAllNew() {
 
   for (size_t i = 0; i < entries_.size(); ++i) {
     currentIndex_ = i;
-    if (entries_[i].exists) continue;
+    if (entries_[i].exists) {
+      // If the server still lists a file that is already present locally, send
+      // the ACK again. This makes the server-side move to inPruefung retry-safe
+      // after a previous ACK/network failure without re-downloading the file.
+      if (acknowledgeDownload(entries_[i])) ackedDownloads_++;
+      continue;
+    }
     statusMessage_ = entries_[i].filename;
     updateHeartbeat(nullptr, true);
     if (!downloadEntry(entries_[i])) {
@@ -389,6 +415,7 @@ void EbookSyncActivity::loop() {
       if (!entry.exists) {
         currentIndex_ = static_cast<size_t>(selectedIndex_ - 1);
         newDownloads_ = 0;
+        ackedDownloads_ = 0;
         {
           RenderLock lock(*this);
           state_ = SYNCING;
