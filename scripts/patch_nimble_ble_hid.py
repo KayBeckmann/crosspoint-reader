@@ -16,6 +16,17 @@ def patch_file(path: Path, replacements):
     return changed
 
 
+def remove_matching(root: Path, pattern: str):
+    if not root.exists():
+        return 0
+    removed = 0
+    for path in root.rglob(pattern):
+        if path.is_file():
+            path.unlink()
+            removed += 1
+    return removed
+
+
 def disable_entire_c_file(path: Path, marker: str):
     if not path.exists():
         return False
@@ -44,7 +55,7 @@ def patch_nimble_for_crosspoint_ble_hid():
     # PlatformIO rebuild to return an error instead; the pairing Activity then
     # shows a normal error screen rather than rebooting.
     core_npl = Path.home() / ".platformio/packages/framework-espidf/components/bt/host/nimble/nimble/porting/npl/freertos/src/npl_os_freertos.c"
-    if patch_file(core_npl, [
+    core_changed = patch_file(core_npl, [
         (
             "        mutex->handle = xSemaphoreCreateRecursiveMutex();\n        BLE_LL_ASSERT(mutex->handle);\n",
             "        mutex->handle = xSemaphoreCreateRecursiveMutex();\n        if (!mutex->handle) {\n            os_memblock_put(&ble_freertos_mutex_pool, mutex);\n            mu->mutex = NULL;\n            return BLE_NPL_INVALID_PARAM;\n        }\n",
@@ -61,8 +72,19 @@ def patch_nimble_for_crosspoint_ble_hid():
             "        semaphor->handle = xSemaphoreCreateCounting(128, tokens);\n        BLE_LL_ASSERT(semaphor->handle);\n    }\n#endif\n\n    return BLE_NPL_OK;\n}\n\nble_npl_error_t\nnpl_freertos_sem_deinit",
             "        semaphor->handle = xSemaphoreCreateCounting(128, tokens);\n        if (!semaphor->handle) {\n            nimble_platform_mem_free((void *)semaphor);\n            sem->sem = NULL;\n            return BLE_NPL_INVALID_PARAM;\n        }\n    }\n#endif\n\n    return BLE_NPL_OK;\n}\n\nble_npl_error_t\nnpl_freertos_sem_deinit",
         ),
-    ]):
+    ])
+    core_text = core_npl.read_text() if core_npl.exists() else ""
+    core_patched = (
+        "os_memblock_put(&ble_freertos_sem_pool, semaphor);" in core_text
+        and "nimble_platform_mem_free((void *)semaphor);" in core_text
+    )
+    if core_changed:
         print("Patched ESP-IDF NimBLE NPL OOM asserts into errors")
+    if core_patched:
+        removed = remove_matching(project_dir / ".pio/build", "npl_os_freertos.c.o")
+        removed += remove_matching(project_dir / ".pio/build", "*npl_os_freertos.c.o")
+        if removed:
+            print(f"Removed {removed} stale NimBLE NPL object(s) so PlatformIO rebuilds the patched ESP-IDF source")
 
     # CrossPoint keeps FreeInk SDK as a clean submodule. Runtime HID host fixes
     # that are needed by Kay's X4 firmware are applied to the symlinked SDK source

@@ -17,8 +17,12 @@
 namespace {
 constexpr unsigned long SCAN_MS = 8000;
 constexpr unsigned long DEFER_BLE_START_MS = 500;
-constexpr size_t BLE_START_MIN_FREE_HEAP = 96 * 1024;
-constexpr size_t BLE_START_MIN_MAX_ALLOC = 32 * 1024;
+// NimBLE allocates several RTOS objects during startup before the HID host can
+// report a normal failure. The X4 crash report from 1d0bf6c showed a FreeRTOS
+// semaphore assert with only ~70 KB heap left inside nimble_port_init(), so the
+// pre-init gate must leave much more than that for the stack's own allocations.
+constexpr size_t BLE_START_MIN_FREE_HEAP = 150 * 1024;
+constexpr size_t BLE_START_MIN_MAX_ALLOC = 48 * 1024;
 constexpr const char* TAG = "BT_PAIR";
 }  // namespace
 
