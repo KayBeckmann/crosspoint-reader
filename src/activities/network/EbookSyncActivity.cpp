@@ -8,9 +8,10 @@
 #include <Logging.h>
 #include <NetworkClientSecure.h>
 #include <WiFi.h>
+#include <esp_crt_bundle.h>
+#include <esp_http_client.h>
 
 #include <cctype>
-#include <cstring>
 
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
@@ -43,58 +44,50 @@ bool isImageCoverExtension(const std::string& ext) {
   return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
 }
 
-bool parseHttpsUrl(const std::string& url, std::string& host, std::string& path) {
-  static constexpr const char* PREFIX = "https://";
-  if (url.rfind(PREFIX, 0) != 0) return false;
-  const size_t hostStart = strlen(PREFIX);
-  const size_t slash = url.find('/', hostStart);
-  if (slash == std::string::npos || slash == hostStart) return false;
-  host = url.substr(hostStart, slash - hostStart);
-  path = url.substr(slash);
-  return !host.empty() && !path.empty();
-}
-
 int postMarkdownDirect(const std::string& url, const std::string& filename, const std::string& body) {
-  std::string host;
-  std::string path;
-  if (!parseHttpsUrl(url, host, path)) return -1002;
+  if (url.rfind("https://", 0) != 0) return -1002;
 
-  NetworkClientSecure client;
-  client.setInsecure();
-  client.setTimeout(15000);
-  if (!client.connect(host.c_str(), 443)) return -1003;
+  esp_http_client_config_t config = {};
+  config.url = url.c_str();
+  config.timeout_ms = 60000;
+  config.buffer_size = 2048;
+  config.buffer_size_tx = 1024;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.keep_alive_enable = false;
 
-  client.print("POST ");
-  client.print(path.c_str());
-  client.print(" HTTP/1.1\r\nHost: ");
-  client.print(host.c_str());
-  client.print("\r\nUser-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION);
-  client.print("\r\nContent-Type: text/markdown; charset=utf-8\r\nX-X4-Note-Filename: ");
-  client.print(filename.c_str());
-  client.print("\r\nContent-Length: ");
-  client.print(static_cast<unsigned>(body.size()));
-  client.print("\r\nConnection: close\r\n\r\n");
-  if (!body.empty()) client.write(reinterpret_cast<const uint8_t*>(body.data()), body.size());
-  client.flush();
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (!client) return -1001;
 
-  const unsigned long deadline = millis() + 15000;
-  while (!client.available() && client.connected() && millis() < deadline) delay(10);
-  if (!client.available()) {
-    client.stop();
-    return -1004;
+  esp_http_client_set_method(client, HTTP_METHOD_POST);
+  esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
+  esp_http_client_set_header(client, "Content-Type", "text/markdown; charset=utf-8");
+  esp_http_client_set_header(client, "X-X4-Note-Filename", filename.c_str());
+
+  const esp_err_t err = esp_http_client_open(client, body.size());
+  if (err != ESP_OK) {
+    LOG_ERR(TAG, "Notes POST open failed: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return -1003;
   }
 
-  std::string status;
-  status.reserve(48);
-  while (client.available()) {
-    const char c = static_cast<char>(client.read());
-    if (c == '\n') break;
-    if (c != '\r' && status.size() < 47) status.push_back(c);
+  size_t written = 0;
+  while (written < body.size()) {
+    const int chunk = esp_http_client_write(client, body.data() + written, body.size() - written);
+    if (chunk <= 0) {
+      LOG_ERR(TAG, "Notes POST write failed after %u/%u bytes", static_cast<unsigned>(written),
+              static_cast<unsigned>(body.size()));
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      return -1006;
+    }
+    written += static_cast<size_t>(chunk);
   }
-  client.stop();
 
-  if (status.rfind("HTTP/", 0) != 0 || status.size() < 12) return -1005;
-  const int code = atoi(status.c_str() + 9);
+  const int64_t contentLength = esp_http_client_fetch_headers(client);
+  (void)contentLength;
+  const int code = esp_http_client_get_status_code(client);
+  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
   return code > 0 ? code : -1005;
 }
 }  // namespace
