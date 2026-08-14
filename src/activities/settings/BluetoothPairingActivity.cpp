@@ -61,12 +61,79 @@ bool BluetoothPairingActivity::hasBleStartHeadroom() const {
 
 void BluetoothPairingActivity::startScan() {
   scanStarted_ = true;
-  startStep_ = StartStep::Headroom1;
   selectedIndex_ = 0;
   lastCount_ = 0;
   error_.clear();
-  status_ = debugStatus("HEAD1");
   state_ = State::Starting;
+
+  auto showStartStep = [this](StartStep step, const char* label) {
+    startStep_ = step;
+    status_ = debugStatus(label);
+    requestUpdateAndWait();
+  };
+
+  showStartStep(StartStep::Headroom1, "HEAD1");
+  if (!hasBleStartHeadroom()) {
+    state_ = State::Error;
+    error_ = tr(STR_MEMORY_ERROR);
+    requestUpdateAndWait();
+    return;
+  }
+
+  showStartStep(StartStep::PowerLock, "PWR");
+  if (!powerLock_) {
+    powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
+    if (!powerLock_) {
+      state_ = State::Error;
+      error_ = tr(STR_MEMORY_ERROR);
+      requestUpdateAndWait();
+      return;
+    }
+  }
+
+  showStartStep(StartStep::WifiOff, "WIFI");
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+  }
+
+  showStartStep(StartStep::Headroom2, "HEAD2");
+  if (!hasBleStartHeadroom()) {
+    state_ = State::Error;
+    error_ = tr(STR_MEMORY_ERROR);
+    requestUpdateAndWait();
+    return;
+  }
+
+  showStartStep(StartStep::Begin, "BEGIN");
+  if (!BleHid.begin("CrossPoint X4")) {
+    state_ = State::Error;
+    error_ = tr(STR_BLUETOOTH_UNAVAILABLE);
+    LOG_ERR(TAG, "BLE HID host begin failed");
+    requestUpdateAndWait();
+    return;
+  }
+
+  showStartStep(StartStep::StartScan, "SCANST");
+  BleHid.releaseScanResults();
+  BleHid.startScan(SCAN_MS);
+
+  showStartStep(StartStep::Verify, "VERIFY");
+  delay(20);
+  BleHid.poll();
+  if (!BleHid.isScanning()) {
+    state_ = State::Error;
+    error_ = tr(STR_BLUETOOTH_SCAN_FAILED);
+    LOG_ERR(TAG, "BLE scan did not start");
+    requestUpdateAndWait();
+    return;
+  }
+  scanStartedMs_ = millis();
+  lastScanUpdateMs_ = 0;
+  state_ = State::Scanning;
+  status_ = debugStatus("SCAN");
+  requestUpdateAndWait();
 }
 
 bool BluetoothPairingActivity::advanceStartScan() {
@@ -274,11 +341,6 @@ void BluetoothPairingActivity::loop() {
   if (state_ == State::Starting && !scanStarted_ && millis() - enteredMs_ >= DEFER_BLE_START_MS) {
     startScan();
     requestUpdate();
-    return;
-  }
-
-  if (state_ == State::Starting && scanStarted_) {
-    advanceStartScan();
     return;
   }
 
