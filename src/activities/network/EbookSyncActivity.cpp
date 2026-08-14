@@ -312,6 +312,34 @@ bool EbookSyncActivity::isSupportedSyncAsset(const std::string& path) const {
   return ext == ".epub" || isImageCoverExtension(ext);
 }
 
+std::string EbookSyncActivity::noteUploadBody(const std::string& filename, const std::string& markdown) {
+  auto yamlQuote = [](const std::string& value) {
+    std::string out;
+    out.reserve(value.size() + 2);
+    out.push_back('\'');
+    for (const char c : value) {
+      if (c == '\'') out.push_back('\'');
+      out.push_back(c);
+    }
+    out.push_back('\'');
+    return out;
+  };
+
+  std::string body;
+  body.reserve(markdown.size() + filename.size() + 128);
+  body += "---\n";
+  body += "source: 01_X4\n";
+  body += "device: XTEINC X4\n";
+  body += "original_filename: ";
+  body += yamlQuote(filename);
+  body += "\nfirmware: ";
+  body += yamlQuote(CROSSPOINT_VERSION);
+  body += "\n---\n\n";
+  body += markdown;
+  if (!body.empty() && body.back() != '\n') body.push_back('\n');
+  return body;
+}
+
 bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::string& filename) {
   HalFile f;
   lastNotesUploadCode_ = 0;
@@ -323,6 +351,7 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   body.reserve(std::min<size_t>(f.size(), 32 * 1024));
   while (f.available()) body.push_back(static_cast<char>(f.read()));
   f.close();
+  body = noteUploadBody(filename, body);
 
   NetworkClientSecure client;
   client.setInsecure();

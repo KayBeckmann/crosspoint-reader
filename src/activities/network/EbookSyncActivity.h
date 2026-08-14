@@ -83,6 +83,7 @@ class EbookSyncActivity : public Activity {
   bool uploadPendingNotes();
   bool uploadNoteFile(const std::string& path, const std::string& filename);
   int listItemCount() const;
+  static std::string noteUploadBody(const std::string& filename, const std::string& markdown);
   static std::string urlEncode(const std::string& value);
   static std::string ensureExtensionPreserved(const std::string& filename, const std::string& originalPath);
 };
