@@ -41,6 +41,8 @@ class BluetoothPairingActivity final : public Activity {
   void startScan();
   bool hasBleStartHeadroom() const;
   void connectSelected();
+  const char* stateLabel() const;
+  std::string debugStatus(const char* state) const;
   std::string itemLabel(int index) const;
   std::string scanStatus() const;
 };
