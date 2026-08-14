@@ -51,7 +51,7 @@ int postMarkdownDirect(const std::string& url, const std::string& filename, cons
   config.url = url.c_str();
   config.timeout_ms = 60000;
   config.buffer_size = 2048;
-  config.buffer_size_tx = 1024;
+  config.buffer_size_tx = 512;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.keep_alive_enable = false;
 
@@ -123,8 +123,26 @@ void EbookSyncActivity::onWifiSelectionComplete(const bool success) {
   {
     RenderLock lock(*this);
     state_ = LOADING_LIST;
-    statusMessage_ = tr(STR_EBOOK_SYNC_LOADING);
+    statusMessage_ = tr(STR_NOTE_SYNC_UPLOADING);
     errorMessage_.clear();
+    operationStartedMs_ = millis();
+    lastHeartbeatMs_ = 0;
+  }
+  requestUpdateAndWait();
+
+  // Upload notes before loading/parsing the eBook list. The X4/ESP32-C3 has very
+  // little RAM; keeping the JSON document + entries_ vector alive before a TLS
+  // POST can fragment/consume the heap enough for esp_http_client_open() to fail.
+  if (!uploadPendingNotes()) {
+    RenderLock lock(*this);
+    setNotesUploadErrorMessage();
+    state_ = ERROR;
+    return;
+  }
+
+  {
+    RenderLock lock(*this);
+    statusMessage_ = tr(STR_EBOOK_SYNC_LOADING);
     operationStartedMs_ = millis();
     lastHeartbeatMs_ = 0;
   }
@@ -272,15 +290,15 @@ bool EbookSyncActivity::fetchAndParseList() {
 
   LOG_DBG(TAG, "Loaded %zu eBook entries", entries_.size());
   updateHeartbeat(tr(STR_EBOOK_SYNC_PARSING), true);
-  if (!uploadPendingNotes()) {
-    char buf[128];
-    const char* filename = lastNotesUploadName_.empty() ? "-" : lastNotesUploadName_.c_str();
-    snprintf(buf, sizeof(buf), "Notes n=%u file=%s HTTP %d", static_cast<unsigned>(foundNotes_), filename,
-             lastNotesUploadCode_);
-    errorMessage_ = buf;
-    return false;
-  }
   return true;
+}
+
+void EbookSyncActivity::setNotesUploadErrorMessage() {
+  char buf[128];
+  const char* filename = lastNotesUploadName_.empty() ? "-" : lastNotesUploadName_.c_str();
+  snprintf(buf, sizeof(buf), "Notes n=%u file=%s HTTP %d", static_cast<unsigned>(foundNotes_), filename,
+           lastNotesUploadCode_);
+  errorMessage_ = buf;
 }
 
 int EbookSyncActivity::listItemCount() const { return entries_.empty() ? 1 : static_cast<int>(entries_.size()) + 1; }

@@ -78,6 +78,7 @@ class EbookSyncActivity : public Activity {
   void updateHeartbeat(const char* message = nullptr, bool force = false);
   std::string progressDetail() const;
   bool fetchAndParseList();
+  void setNotesUploadErrorMessage();
   void syncAllNew();
   bool downloadEntry(EbookEntry& entry);
   bool acknowledgeDownload(const EbookEntry& entry);
