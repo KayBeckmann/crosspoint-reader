@@ -118,10 +118,13 @@ std::string BluetoothPairingActivity::itemLabel(int index) const {
   const uint8_t count = BleHid.deviceCount();
   if (count == 0) {
     const auto dbg = BleHid.scanDebugStats();
-    if (dbg.seen == 0) return tr(STR_BLUETOOTH_NO_DEVICES);
     char buf[96];
-    snprintf(buf, sizeof(buf), "Last: %s %ddBm%s%s%s", dbg.lastName[0] ? dbg.lastName : dbg.lastAddr, dbg.lastRssi,
-             dbg.lastAccepted ? "" : " filtered", dbg.lastConnectable ? " conn" : "", dbg.lastHid ? " HID" : "");
+    if (dbg.seen == 0) {
+      snprintf(buf, sizeof(buf), "DBG dev=0 seen=0 ok=0 filt=0");
+    } else {
+      snprintf(buf, sizeof(buf), "Last: %s %ddBm%s%s%s", dbg.lastName[0] ? dbg.lastName : dbg.lastAddr, dbg.lastRssi,
+               dbg.lastAccepted ? "" : " filtered", dbg.lastConnectable ? " conn" : "", dbg.lastHid ? " HID" : "");
+    }
     return buf;
   }
   if (index < 0 || index >= count) return "";
