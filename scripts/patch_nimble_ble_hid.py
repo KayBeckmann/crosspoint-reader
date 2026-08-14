@@ -169,11 +169,15 @@ def patch_nimble_for_crosspoint_ble_hid():
         print("Patched BLE HID scanner to show primary discoveries before scan responses")
     if patch_file(host, [
         (
-            "  if (!addr) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
+            "  const bool realName = name && name[0] && strcmp(name, addr) != 0;\n#if !FREEINK_BLE_HID_SHOW_UNNAMED_DEVICES\n  if (!realName && !hid) {\n",
+            "  const bool realName = name && name[0] && strcmp(name, addr) != 0;\n  if (!realName && !connectable && !hid) return;\n#if !FREEINK_BLE_HID_SHOW_UNNAMED_DEVICES\n  if (!realName && !hid) {\n",
+        ),
+        (
             "  if (!addr) return;\n  if (!connectable && !hid) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
-        )
+            "  if (!addr) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
+        ),
     ]):
-        print("Patched BLE HID scanner to keep connectable unnamed devices")
+        print("Patched BLE HID scanner to show named, connectable, or HID devices")
 
     # The X4 BLE keyboard host only needs normal HID scanning/connection. Periodic
     # advertising sync is unused and does not build cleanly against the current
