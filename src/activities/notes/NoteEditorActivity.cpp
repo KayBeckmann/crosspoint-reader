@@ -284,8 +284,11 @@ void NoteEditorActivity::handleBleKeys() {
 
   freeink::KeyEvent ev;
   bool changed = false;
+  char lastKeyStatus[64] = {0};
   while (BleHid.popKey(ev)) {
     if (!ev.pressed) continue;
+    snprintf(lastKeyStatus, sizeof(lastKeyStatus), "KEY k=%02X m=%02X ch=%02X", static_cast<unsigned>(ev.keycode),
+             static_cast<unsigned>(ev.mods), static_cast<unsigned char>(ev.ch));
     if (const char* text = germanTextForKey(ev)) {
       insertText(text);
       changed = true;
@@ -326,7 +329,7 @@ void NoteEditorActivity::handleBleKeys() {
     }
   }
   if (changed) {
-    status_ = tr(STR_NOTE_BLUETOOTH_CONNECTED);
+    status_ = lastKeyStatus[0] ? lastKeyStatus : tr(STR_NOTE_BLUETOOTH_CONNECTED);
     requestUpdate();
   }
 }
