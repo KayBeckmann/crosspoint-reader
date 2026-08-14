@@ -429,23 +429,35 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   return code >= 200 && code < 300;
 }
 
-bool EbookSyncActivity::uploadPendingNotes() {
-  uploadedNotes_ = 0;
-  deletedNotes_ = 0;
-  foundNotes_ = 0;
-  lastNotesUploadName_.clear();
-  if (!Storage.exists(NOTES_DIR)) return true;
+bool EbookSyncActivity::findNextNoteFile(std::string& filename) {
+  filename.clear();
+  if (!Storage.exists(NOTES_DIR)) return false;
   auto dir = Storage.open(NOTES_DIR);
   if (!dir || !dir.isDirectory()) return false;
   char name[160];
-  bool ok = true;
   for (auto f = dir.openNextFile(); f; f = dir.openNextFile()) {
     f.getName(name, sizeof(name));
     const bool isDir = f.isDirectory();
     f.close();
     if (isDir) continue;
-    std::string filename{name};
-    if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".md") continue;
+    std::string candidate{name};
+    if (candidate.size() < 3 || candidate.substr(candidate.size() - 3) != ".md") continue;
+    filename = candidate;
+    break;
+  }
+  dir.close();
+  return !filename.empty();
+}
+
+bool EbookSyncActivity::uploadPendingNotes() {
+  uploadedNotes_ = 0;
+  deletedNotes_ = 0;
+  foundNotes_ = 0;
+  lastNotesUploadName_.clear();
+
+  while (true) {
+    std::string filename;
+    if (!findNextNoteFile(filename)) break;
     foundNotes_++;
     lastNotesUploadName_ = filename;
     const std::string path = std::string(NOTES_DIR) + "/" + filename;
@@ -456,16 +468,18 @@ bool EbookSyncActivity::uploadPendingNotes() {
     updateHeartbeat(nullptr, true);
     if (uploadNoteFile(path, filename)) {
       uploadedNotes_++;
-      if (Storage.remove(path.c_str()))
+      if (Storage.remove(path.c_str())) {
         deletedNotes_++;
-      else
-        ok = false;
+      } else {
+        lastNotesUploadCode_ = -1007;
+        LOG_ERR(TAG, "Uploaded note but failed to delete local file: %s", path.c_str());
+        return false;
+      }
     } else {
-      ok = false;
+      return false;
     }
   }
-  dir.close();
-  return ok;
+  return true;
 }
 
 void EbookSyncActivity::syncAllNew() {

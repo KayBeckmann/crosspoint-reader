@@ -84,6 +84,7 @@ class EbookSyncActivity : public Activity {
   bool acknowledgeDownload(const EbookEntry& entry);
   bool isSupportedSyncAsset(const std::string& path) const;
   bool uploadPendingNotes();
+  bool findNextNoteFile(std::string& filename);
   bool uploadNoteFile(const std::string& path, const std::string& filename);
   int listItemCount() const;
   static std::string noteUploadBody(const std::string& filename, const std::string& markdown);
