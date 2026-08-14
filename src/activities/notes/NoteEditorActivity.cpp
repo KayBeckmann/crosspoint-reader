@@ -59,6 +59,10 @@ void NoteEditorActivity::ensureBleConnected() {
 }
 
 void NoteEditorActivity::setBleStatus(const char* prefix) {
+  if (!lastKeyStatus_.empty() && millis() - lastKeyStatusMs_ < 5000) {
+    status_ = lastKeyStatus_;
+    return;
+  }
   char buf[96];
   snprintf(buf, sizeof(buf), "%s BLE bonds=%u conn=%d ing=%d", prefix, static_cast<unsigned>(BleHid.pairedCount()),
            BleHid.isConnected() ? 1 : 0, BleHid.isConnecting() ? 1 : 0);
@@ -287,8 +291,14 @@ void NoteEditorActivity::handleBleKeys() {
   char lastKeyStatus[64] = {0};
   while (BleHid.popKey(ev)) {
     if (!ev.pressed) continue;
-    snprintf(lastKeyStatus, sizeof(lastKeyStatus), "KEY k=%02X m=%02X ch=%02X", static_cast<unsigned>(ev.keycode),
+    snprintf(lastKeyStatus, sizeof(lastKeyStatus), "KEY k=%02X m=%02X c=%02X", static_cast<unsigned>(ev.keycode),
              static_cast<unsigned>(ev.mods), static_cast<unsigned char>(ev.ch));
+    lastKeyStatus_ = lastKeyStatus;
+    lastKeyStatusMs_ = millis();
+    insertText("[");
+    insertText(lastKeyStatus);
+    insertText("]");
+    changed = true;
     if (const char* text = germanTextForKey(ev)) {
       insertText(text);
       changed = true;

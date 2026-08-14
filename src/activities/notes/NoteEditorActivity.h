@@ -35,8 +35,10 @@ class NoteEditorActivity final : public Activity {
   bool closeRequested_ = false;
   unsigned long lastAutosaveMs_ = 0;
   unsigned long lastBleReconnectMs_ = 0;
+  unsigned long lastKeyStatusMs_ = 0;
   std::unique_ptr<HalPowerManager::Lock> powerLock_;
   std::string status_;
+  std::string lastKeyStatus_;
 
   bool load();
   bool save();
