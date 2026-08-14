@@ -224,7 +224,10 @@ bool EbookSyncActivity::fetchAndParseList() {
 
   LOG_DBG(TAG, "Loaded %zu eBook entries", entries_.size());
   updateHeartbeat(tr(STR_EBOOK_SYNC_PARSING), true);
-  uploadPendingNotes();
+  if (!uploadPendingNotes()) {
+    errorMessage_ = "Notes upload failed";
+    return false;
+  }
   return true;
 }
 
@@ -321,9 +324,11 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   const std::string url =
       std::string(X4_NOTES_UPLOAD_URL) + "?source=" + urlEncode("01_X4") + "&filename=" + urlEncode(filename);
   if (!http.begin(client, url.c_str())) return false;
+  http.setTimeout(20000);
   http.addHeader("Content-Type", "text/markdown; charset=utf-8");
   http.addHeader("X-X4-Note-Filename", filename.c_str());
   const int code = http.POST(reinterpret_cast<uint8_t*>(body.data()), body.size());
+  if (code < 200 || code >= 300) LOG_ERR(TAG, "Notes upload failed: %s HTTP %d", filename.c_str(), code);
   http.end();
   return code >= 200 && code < 300;
 }
