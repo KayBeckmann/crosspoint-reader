@@ -42,6 +42,61 @@ std::string extensionOf(const std::string& path) {
 bool isImageCoverExtension(const std::string& ext) {
   return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
 }
+
+bool parseHttpsUrl(const std::string& url, std::string& host, std::string& path) {
+  static constexpr const char* PREFIX = "https://";
+  if (url.rfind(PREFIX, 0) != 0) return false;
+  const size_t hostStart = strlen(PREFIX);
+  const size_t slash = url.find('/', hostStart);
+  if (slash == std::string::npos || slash == hostStart) return false;
+  host = url.substr(hostStart, slash - hostStart);
+  path = url.substr(slash);
+  return !host.empty() && !path.empty();
+}
+
+int postMarkdownDirect(const std::string& url, const std::string& filename, const std::string& body) {
+  std::string host;
+  std::string path;
+  if (!parseHttpsUrl(url, host, path)) return -1002;
+
+  NetworkClientSecure client;
+  client.setInsecure();
+  client.setTimeout(15000);
+  if (!client.connect(host.c_str(), 443)) return -1003;
+
+  client.print("POST ");
+  client.print(path.c_str());
+  client.print(" HTTP/1.1\r\nHost: ");
+  client.print(host.c_str());
+  client.print("\r\nUser-Agent: CrossPoint-ESP32-" CROSSPOINT_VERSION);
+  client.print("\r\nContent-Type: text/markdown; charset=utf-8\r\nX-X4-Note-Filename: ");
+  client.print(filename.c_str());
+  client.print("\r\nContent-Length: ");
+  client.print(static_cast<unsigned>(body.size()));
+  client.print("\r\nConnection: close\r\n\r\n");
+  if (!body.empty()) client.write(reinterpret_cast<const uint8_t*>(body.data()), body.size());
+  client.flush();
+
+  const unsigned long deadline = millis() + 15000;
+  while (!client.available() && client.connected() && millis() < deadline) delay(10);
+  if (!client.available()) {
+    client.stop();
+    return -1004;
+  }
+
+  std::string status;
+  status.reserve(48);
+  while (client.available()) {
+    const char c = static_cast<char>(client.read());
+    if (c == '\n') break;
+    if (c != '\r' && status.size() < 47) status.push_back(c);
+  }
+  client.stop();
+
+  if (status.rfind("HTTP/", 0) != 0 || status.size() < 12) return -1005;
+  const int code = atoi(status.c_str() + 9);
+  return code > 0 ? code : -1005;
+}
 }  // namespace
 
 EbookSyncActivity::EbookSyncActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
@@ -353,23 +408,11 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   f.close();
   body = noteUploadBody(filename, body);
 
-  NetworkClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
   const std::string url =
       std::string(X4_NOTES_UPLOAD_URL) + "?source=" + urlEncode("01_X4") + "&filename=" + urlEncode(filename);
-  if (!http.begin(client, url.c_str())) {
-    lastNotesUploadCode_ = -1001;
-    return false;
-  }
-  http.setConnectTimeout(10000);
-  http.setTimeout(15000);
-  http.addHeader("Content-Type", "text/markdown; charset=utf-8");
-  http.addHeader("X-X4-Note-Filename", filename.c_str());
-  const int code = http.POST(reinterpret_cast<uint8_t*>(body.data()), body.size());
+  const int code = postMarkdownDirect(url, filename, body);
   lastNotesUploadCode_ = code;
   if (code < 200 || code >= 300) LOG_ERR(TAG, "Notes upload failed: %s HTTP %d", filename.c_str(), code);
-  http.end();
   return code >= 200 && code < 300;
 }
 

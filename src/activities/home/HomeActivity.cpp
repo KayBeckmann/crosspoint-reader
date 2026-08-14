@@ -4,6 +4,7 @@
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalGPIO.h>
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Utf8.h>
@@ -169,6 +170,14 @@ void HomeActivity::freeCoverBuffer() {
 void HomeActivity::loop() {
   const int menuCount = getMenuItemCount();
   const auto& metrics = UITheme::getInstance().getMetrics();
+
+  // X4 shortcut: the physical left/front "pen" key opens Notes directly from
+  // Home. Use the raw front-button edge so user remapping of logical navigation
+  // cannot make the hardware-labelled note key disappear.
+  if (mappedInput.getPressedFrontButton() == HalGPIO::BTN_LEFT) {
+    onNotesOpen();
+    return;
+  }
 
   auto activateSelection = [this] {
     if (selectorIndex < recentBooks.size()) {
