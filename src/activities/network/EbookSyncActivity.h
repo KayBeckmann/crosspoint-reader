@@ -67,6 +67,7 @@ class EbookSyncActivity : public Activity {
   unsigned long lastHeartbeatMs_ = 0;
   size_t uploadedNotes_ = 0;
   size_t deletedNotes_ = 0;
+  int lastNotesUploadCode_ = 0;
   std::string statusMessage_;
   std::string errorMessage_;
   bool cancelRequested_ = false;

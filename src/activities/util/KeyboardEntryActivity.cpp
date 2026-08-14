@@ -2,6 +2,8 @@
 
 #include <HalGPIO.h>
 #include <I18n.h>
+#include <Memory.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cstring>
@@ -149,10 +151,19 @@ void KeyboardEntryActivity::onEnter() {
   touchRouter.holdMs = TOUCH_LONG_PRESS_MS;
   touchRouter.overrideHoldMs = TOUCH_DEL_LONG_PRESS_MS;
   interactionsReady = false;
+  ensureBleConnected();
   requestUpdate();
 }
 
-void KeyboardEntryActivity::onExit() { Activity::onExit(); }
+void KeyboardEntryActivity::onExit() {
+  Activity::onExit();
+  if (bleStarted) {
+    BleHid.end();
+    bleStarted = false;
+    bleConnectIssued = false;
+  }
+  powerLock.reset();
+}
 
 const fui::KeyboardLayout& KeyboardEntryActivity::currentLayout() const {
   if (symbols) return fui::builtinKeyboardLayout(layoutId, shifted, true);
@@ -259,6 +270,194 @@ bool KeyboardEntryActivity::backspaceUtf8() {
   text.erase(prev, cursorPos - prev);
   cursorPos = prev;
   return true;
+}
+
+const char* KeyboardEntryActivity::germanTextForKey(const freeink::KeyEvent& ev) const {
+  const bool shift = (ev.mods & 0x22) != 0;
+  const bool altGr = (ev.mods & 0x40) != 0;
+  const bool ctrl = (ev.mods & 0x11) != 0;
+  if (ctrl && !altGr) return nullptr;
+
+  switch (ev.keycode) {
+    case 0x04:
+      return shift ? "A" : "a";
+    case 0x05:
+      return shift ? "B" : "b";
+    case 0x06:
+      return shift ? "C" : "c";
+    case 0x07:
+      return shift ? "D" : "d";
+    case 0x08:
+      return altGr ? "€" : (shift ? "E" : "e");
+    case 0x09:
+      return shift ? "F" : "f";
+    case 0x0A:
+      return shift ? "G" : "g";
+    case 0x0B:
+      return shift ? "H" : "h";
+    case 0x0C:
+      return shift ? "I" : "i";
+    case 0x0D:
+      return shift ? "J" : "j";
+    case 0x0E:
+      return shift ? "K" : "k";
+    case 0x0F:
+      return shift ? "L" : "l";
+    case 0x10:
+      return altGr ? "µ" : (shift ? "M" : "m");
+    case 0x11:
+      return shift ? "N" : "n";
+    case 0x12:
+      return shift ? "O" : "o";
+    case 0x13:
+      return shift ? "P" : "p";
+    case 0x14:
+      return altGr ? "@" : (shift ? "Q" : "q");
+    case 0x15:
+      return shift ? "R" : "r";
+    case 0x16:
+      return shift ? "S" : "s";
+    case 0x17:
+      return shift ? "T" : "t";
+    case 0x18:
+      return shift ? "U" : "u";
+    case 0x19:
+      return shift ? "V" : "v";
+    case 0x1A:
+      return shift ? "W" : "w";
+    case 0x1B:
+      return shift ? "X" : "x";
+    case 0x1C:
+      return shift ? "Z" : "z";
+    case 0x1D:
+      return shift ? "Y" : "y";
+    case 0x1E:
+      return shift ? "!" : "1";
+    case 0x1F:
+      return shift ? "\"" : "2";
+    case 0x20:
+      return shift ? "§" : "3";
+    case 0x21:
+      return shift ? "$" : "4";
+    case 0x22:
+      return shift ? "%" : "5";
+    case 0x23:
+      return shift ? "&" : "6";
+    case 0x24:
+      return altGr ? "{" : (shift ? "/" : "7");
+    case 0x25:
+      return altGr ? "[" : (shift ? "(" : "8");
+    case 0x26:
+      return altGr ? "]" : (shift ? ")" : "9");
+    case 0x27:
+      return altGr ? "}" : (shift ? "=" : "0");
+    case 0x2C:
+      return " ";
+    case 0x2D:
+      return altGr ? "\\" : (shift ? "?" : "ß");
+    case 0x2E:
+      return shift ? "`" : "´";
+    case 0x2F:
+      return shift ? "Ü" : "ü";
+    case 0x30:
+      return altGr ? "~" : (shift ? "*" : "+");
+    case 0x31:
+      return shift ? "'" : "#";
+    case 0x32:
+      return altGr ? "|" : (shift ? ">" : "<");
+    case 0x33:
+      return shift ? "Ö" : "ö";
+    case 0x34:
+      return shift ? "Ä" : "ä";
+    case 0x35:
+      return shift ? "°" : "^";
+    case 0x36:
+      return shift ? ";" : ",";
+    case 0x37:
+      return shift ? ":" : ".";
+    case 0x38:
+      return shift ? "_" : "-";
+    default:
+      return nullptr;
+  }
+}
+
+void KeyboardEntryActivity::ensureBleConnected() {
+  if (inputType != InputType::Text) return;
+  if (!powerLock) powerLock = makeUniqueNoThrow<HalPowerManager::Lock>();
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+  }
+  if (BleHid.begin("CrossPoint X4")) {
+    bleStarted = true;
+    requestBleReconnect(true);
+  }
+}
+
+void KeyboardEntryActivity::requestBleReconnect(bool force) {
+  if (!bleStarted) return;
+  BleHid.poll();
+  if (BleHid.isConnected()) {
+    bleConnectIssued = false;
+    return;
+  }
+  if (BleHid.isConnecting() || BleHid.pairedCount() == 0) return;
+  const unsigned long now = millis();
+  if (!force && now - lastBleReconnectMs < 3000) return;
+  lastBleReconnectMs = now;
+  bleConnectIssued = BleHid.connect(BleHid.paired(0).addr);
+}
+
+bool KeyboardEntryActivity::handleBleKeys() {
+  if (!bleStarted) return false;
+  BleHid.poll();
+  if (!BleHid.isConnected()) requestBleReconnect(false);
+
+  freeink::KeyEvent ev;
+  bool changed = false;
+  while (BleHid.popKey(ev)) {
+    if (!ev.pressed) continue;
+    if (const char* out = germanTextForKey(ev)) {
+      insertUtf8(out);
+      changed = true;
+      continue;
+    }
+    if (ev.ch) {
+      const char out[2] = {ev.ch, '\0'};
+      insertUtf8(out);
+      changed = true;
+      continue;
+    }
+    switch (ev.special) {
+      case freeink::SpecialKey::Enter:
+        onComplete(text);
+        return false;
+      case freeink::SpecialKey::Backspace:
+      case freeink::SpecialKey::Delete:
+        changed = backspaceUtf8() || changed;
+        break;
+      case freeink::SpecialKey::Tab:
+        insertUtf8("  ");
+        changed = true;
+        break;
+      case freeink::SpecialKey::Left:
+        if (cursorPos > 0) cursorPos = utf8Prev(text, cursorPos);
+        changed = true;
+        break;
+      case freeink::SpecialKey::Right:
+        if (cursorPos < text.length()) cursorPos = utf8Next(text, cursorPos);
+        changed = true;
+        break;
+      case freeink::SpecialKey::Escape:
+        onCancel();
+        return false;
+      default:
+        break;
+    }
+  }
+  return changed;
 }
 
 bool KeyboardEntryActivity::activateValue(const int16_t value, const bool longPress) {
@@ -491,6 +690,14 @@ fui::Rect KeyboardEntryActivity::keyboardRect() const {
 }
 
 void KeyboardEntryActivity::loop() {
+  if (handleBleKeys()) {
+    cursorMode = false;
+    togglePos = false;
+    hintVisible = false;
+    requestUpdate();
+    return;
+  }
+
   int tx = 0;
   int ty = 0;
 

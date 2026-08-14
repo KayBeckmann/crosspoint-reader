@@ -1,9 +1,12 @@
 #pragma once
+#include <BleKeyboardHost.h>
 #include <FreeInkUIGfxRenderer.h>
 #include <GfxRenderer.h>
+#include <HalPowerManager.h>
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -87,6 +90,10 @@ class KeyboardEntryActivity : public Activity {
   int delPressCount = 0;
   bool hintVisible = false;
   unsigned long hintShowTime = 0;
+  bool bleStarted = false;
+  bool bleConnectIssued = false;
+  unsigned long lastBleReconnectMs = 0;
+  std::unique_ptr<HalPowerManager::Lock> powerLock;
 
   void onComplete(std::string text);
   void onCancel();
@@ -114,6 +121,10 @@ class KeyboardEntryActivity : public Activity {
 
   void insertUtf8(const char* out);
   bool backspaceUtf8();
+  const char* germanTextForKey(const freeink::KeyEvent& ev) const;
+  void ensureBleConnected();
+  void requestBleReconnect(bool force = false);
+  bool handleBleKeys();
   static size_t utf8Prev(const std::string& s, size_t pos);
   static size_t utf8Next(const std::string& s, size_t pos);
 
