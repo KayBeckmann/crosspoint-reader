@@ -32,7 +32,7 @@ void BluetoothPairingActivity::onEnter() {
   state_ = State::Starting;
   scanStarted_ = false;
   enteredMs_ = millis();
-  status_ = tr(STR_BLUETOOTH_SCANNING);
+  status_ = "START DBG waiting";
   error_.clear();
   requestUpdate();
 }
@@ -63,7 +63,7 @@ void BluetoothPairingActivity::startScan() {
   selectedIndex_ = 0;
   lastCount_ = 0;
   error_.clear();
-  status_ = tr(STR_BLUETOOTH_SCANNING);
+  status_ = debugStatus("START");
   state_ = State::Starting;
   if (!hasBleStartHeadroom()) {
     state_ = State::Error;
@@ -107,6 +107,7 @@ void BluetoothPairingActivity::startScan() {
   scanStartedMs_ = millis();
   lastScanUpdateMs_ = 0;
   state_ = State::Scanning;
+  status_ = debugStatus("SCAN");
 }
 
 const char* BluetoothPairingActivity::stateLabel() const {
@@ -216,6 +217,7 @@ void BluetoothPairingActivity::loop() {
         BleHid.startScan(SCAN_MS);
         scanStartedMs_ = millis();
         lastScanUpdateMs_ = 0;
+        status_ = debugStatus("SCAN");
       }
       status_ = count == 0 ? debugStatus("DONE") : tr(STR_BLUETOOTH_SELECT_DEVICE);
       requestUpdate();
