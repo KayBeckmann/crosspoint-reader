@@ -91,7 +91,8 @@ def patch_nimble_for_crosspoint_ble_hid():
     # during the PlatformIO build, so the main repo remains self-contained.
     host = project_dir / "freeink-sdk/libs/network/BleKeyboardHost/src/BleKeyboardHost.cpp"
     header = project_dir / "freeink-sdk/libs/network/BleKeyboardHost/include/BleKeyboardHost.h"
-    if patch_file(header, [
+    header_text = header.read_text() if header.exists() else ""
+    if "struct ScanDebugStats" not in header_text and patch_file(header, [
         (
             "struct DiscoveredDevice {\n  char addr[18] = {0};  // \"AA:BB:CC:DD:EE:FF\"\n  char name[32] = {0};  // falls back to the address when no name was received\n  int rssi = 0;\n  uint8_t addrType = 0;  // BLE address type, needed to reconnect\n  bool hasName = false;  // true when the advertised name was actually received\n  bool hid = false;      // advertises the HID service (0x1812)\n  bool connectable = false;\n};\n",
             "struct DiscoveredDevice {\n  char addr[18] = {0};  // \"AA:BB:CC:DD:EE:FF\"\n  char name[32] = {0};  // falls back to the address when no name was received\n  int rssi = 0;\n  uint8_t addrType = 0;  // BLE address type, needed to reconnect\n  bool hasName = false;  // true when the advertised name was actually received\n  bool hid = false;      // advertises the HID service (0x1812)\n  bool connectable = false;\n};\n\nstruct ScanDebugStats {\n  uint32_t seen = 0;\n  uint32_t accepted = 0;\n  uint32_t filtered = 0;\n  char lastAddr[18] = {0};\n  char lastName[32] = {0};\n  int lastRssi = 0;\n  bool lastHid = false;\n  bool lastConnectable = false;\n  bool lastAccepted = false;\n};\n",
@@ -203,7 +204,8 @@ def patch_nimble_for_crosspoint_ble_hid():
     ]):
         print("Patched BLE HID scan debug reset")
 
-    if patch_file(host, [
+    host_text = host.read_text() if host.exists() else ""
+    if "BleKeyboardHost::scanDebugStats() const" not in host_text and patch_file(host, [
         (
             "const DiscoveredDevice& BleKeyboardHost::device(uint8_t i) const {\n  static const DiscoveredDevice kEmpty{};\n  return i < deviceCount_ ? devices_[i] : kEmpty;\n}\n",
             "const DiscoveredDevice& BleKeyboardHost::device(uint8_t i) const {\n  static const DiscoveredDevice kEmpty{};\n  return i < deviceCount_ ? devices_[i] : kEmpty;\n}\n\nScanDebugStats BleKeyboardHost::scanDebugStats() const {\n  ScanDebugStats out;\n  portENTER_CRITICAL(&g_mux);\n  out = scanDebug_;\n  portEXIT_CRITICAL(&g_mux);\n  return out;\n}\n",
@@ -211,7 +213,8 @@ def patch_nimble_for_crosspoint_ble_hid():
     ]):
         print("Patched BLE HID scan debug getter")
 
-    if patch_file(host, [
+    host_text = host.read_text() if host.exists() else ""
+    if "scanDebug_.seen++" not in host_text and patch_file(host, [
         (
             'void BleKeyboardHost::onScanResultIngest(const char* addr, const char* name, int rssi, uint8_t type, bool hid,\n                                         bool connectable) {\n  if (!addr) return;\n  // A "real" name (not the address fallback) should never be downgraded back to\n  // the address on a later primary-only advertisement.\n  const bool realName = name && name[0] && strcmp(name, addr) != 0;\n  if (!realName && !connectable && !hid) return;\n#if !FREEINK_BLE_HID_SHOW_UNNAMED_DEVICES\n',
             'void BleKeyboardHost::onScanResultIngest(const char* addr, const char* name, int rssi, uint8_t type, bool hid,\n                                         bool connectable) {\n  if (!addr) return;\n  // A "real" name (not the address fallback) should never be downgraded back to\n  // the address on a later primary-only advertisement.\n  const bool realName = name && name[0] && strcmp(name, addr) != 0;\n  const bool accepted = realName || connectable || hid;\n  portENTER_CRITICAL(&g_mux);\n  scanDebug_.seen++;\n  strncpy(scanDebug_.lastAddr, addr, sizeof(scanDebug_.lastAddr) - 1);\n  scanDebug_.lastAddr[sizeof(scanDebug_.lastAddr) - 1] = \'\\0\';\n  strncpy(scanDebug_.lastName, name && name[0] ? name : addr, sizeof(scanDebug_.lastName) - 1);\n  scanDebug_.lastName[sizeof(scanDebug_.lastName) - 1] = \'\\0\';\n  scanDebug_.lastRssi = rssi;\n  scanDebug_.lastHid = hid;\n  scanDebug_.lastConnectable = connectable;\n  scanDebug_.lastAccepted = accepted;\n  if (accepted) {\n    scanDebug_.accepted++;\n  } else {\n    scanDebug_.filtered++;\n  }\n  portEXIT_CRITICAL(&g_mux);\n  if (!accepted) return;\n#if !FREEINK_BLE_HID_SHOW_UNNAMED_DEVICES\n',
