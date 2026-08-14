@@ -5,6 +5,8 @@
 #include <HalStorage.h>
 #include <I18n.h>
 #include <Logging.h>
+#include <Memory.h>
+#include <WiFi.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -17,7 +19,7 @@ namespace {
 constexpr const char* TAG = "NOTE";
 constexpr unsigned long AUTOSAVE_MS = 2000;
 constexpr size_t MAX_NOTE_BYTES = 64 * 1024;
-}
+}  // namespace
 
 void NoteEditorActivity::onEnter() {
   Activity::onEnter();
@@ -25,7 +27,7 @@ void NoteEditorActivity::onEnter() {
   cursor_ = text_.size();
   ensureBleConnected();
   lastAutosaveMs_ = millis();
-  status_ = createdNow_ ? tr(STR_NOTE_CREATED) : tr(STR_NOTE_OPENED);
+  if (status_.empty()) status_ = createdNow_ ? tr(STR_NOTE_CREATED) : tr(STR_NOTE_OPENED);
   requestUpdate();
 }
 
@@ -35,19 +37,63 @@ void NoteEditorActivity::onExit() {
   if (bleStarted_) {
     BleHid.end();
     bleStarted_ = false;
+    bleConnectIssued_ = false;
   }
+  powerLock_.reset();
 }
 
 void NoteEditorActivity::ensureBleConnected() {
+  if (!powerLock_) powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
+  if (WiFi.getMode() != WIFI_MODE_NULL) {
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(200);
+  }
+
   if (BleHid.begin("CrossPoint X4")) {
     bleStarted_ = true;
-    if (!BleHid.isConnected() && BleHid.pairedCount() > 0) {
-      BleHid.connect(BleHid.paired(0).addr);
-      status_ = tr(STR_NOTE_BLUETOOTH_CONNECTING);
-    }
+    requestBleReconnect(true);
   } else {
     status_ = tr(STR_BLUETOOTH_UNAVAILABLE);
   }
+}
+
+void NoteEditorActivity::setBleStatus(const char* prefix) {
+  char buf[96];
+  snprintf(buf, sizeof(buf), "%s BLE bonds=%u conn=%d ing=%d", prefix, static_cast<unsigned>(BleHid.pairedCount()),
+           BleHid.isConnected() ? 1 : 0, BleHid.isConnecting() ? 1 : 0);
+  status_ = buf;
+}
+
+void NoteEditorActivity::requestBleReconnect(bool force) {
+  if (!bleStarted_) return;
+  BleHid.poll();
+  if (BleHid.isConnected()) {
+    setBleStatus("BLE OK");
+    bleConnectIssued_ = false;
+    return;
+  }
+  if (BleHid.isConnecting()) {
+    setBleStatus("BLE CONN");
+    return;
+  }
+
+  char fail[48];
+  if (BleHid.takeConnectFailure(fail, sizeof(fail))) {
+    status_ = fail;
+    bleConnectIssued_ = false;
+  }
+
+  if (BleHid.pairedCount() == 0) {
+    setBleStatus("BLE NO BOND");
+    return;
+  }
+
+  const unsigned long now = millis();
+  if (!force && now - lastBleReconnectMs_ < 3000) return;
+  lastBleReconnectMs_ = now;
+  bleConnectIssued_ = BleHid.connect(BleHid.paired(0).addr);
+  setBleStatus(bleConnectIssued_ ? "BLE TRY" : "BLE WAIT");
 }
 
 bool NoteEditorActivity::load() {
@@ -118,7 +164,8 @@ void NoteEditorActivity::moveCursorRight() {
 void NoteEditorActivity::handleBleKeys() {
   if (!bleStarted_) return;
   BleHid.poll();
-  if (BleHid.isConnected()) status_ = tr(STR_NOTE_BLUETOOTH_CONNECTED);
+  if (!BleHid.isConnected()) requestBleReconnect(false);
+  if (BleHid.isConnected()) setBleStatus("BLE OK");
 
   freeink::KeyEvent ev;
   bool changed = false;
@@ -158,7 +205,10 @@ void NoteEditorActivity::handleBleKeys() {
         break;
     }
   }
-  if (changed) requestUpdate();
+  if (changed) {
+    status_ = tr(STR_NOTE_BLUETOOTH_CONNECTED);
+    requestUpdate();
+  }
 }
 
 void NoteEditorActivity::loop() {

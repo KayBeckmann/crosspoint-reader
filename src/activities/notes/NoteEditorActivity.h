@@ -1,5 +1,7 @@
 #pragma once
 
+#include <HalPowerManager.h>
+
 #include <string>
 #include <vector>
 
@@ -8,7 +10,8 @@
 
 class NoteEditorActivity final : public Activity {
  public:
-  explicit NoteEditorActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path, bool createdNow = false)
+  explicit NoteEditorActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, std::string path,
+                              bool createdNow = false)
       : Activity("NoteEditor", renderer, mappedInput), path_(std::move(path)), createdNow_(createdNow) {}
 
   void onEnter() override;
@@ -26,9 +29,12 @@ class NoteEditorActivity final : public Activity {
   bool dirty_ = false;
   bool savedOnce_ = false;
   bool bleStarted_ = false;
+  bool bleConnectIssued_ = false;
   bool confirmHeld_ = false;
   bool closeRequested_ = false;
   unsigned long lastAutosaveMs_ = 0;
+  unsigned long lastBleReconnectMs_ = 0;
+  std::unique_ptr<HalPowerManager::Lock> powerLock_;
   std::string status_;
 
   bool load();
@@ -40,5 +46,7 @@ class NoteEditorActivity final : public Activity {
   void moveCursorRight();
   void handleBleKeys();
   void ensureBleConnected();
+  void requestBleReconnect(bool force = false);
+  void setBleStatus(const char* prefix);
   std::vector<std::string> visibleLines(int maxLines) const;
 };
