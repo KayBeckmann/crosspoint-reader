@@ -30,6 +30,7 @@ constexpr const char* TAG = "BT_PAIR";
 void BluetoothPairingActivity::onEnter() {
   Activity::onEnter();
   state_ = State::Starting;
+  startStep_ = StartStep::Wait;
   scanStarted_ = false;
   enteredMs_ = millis();
   status_ = "START DBG waiting";
@@ -60,54 +61,130 @@ bool BluetoothPairingActivity::hasBleStartHeadroom() const {
 
 void BluetoothPairingActivity::startScan() {
   scanStarted_ = true;
+  startStep_ = StartStep::Headroom1;
   selectedIndex_ = 0;
   lastCount_ = 0;
   error_.clear();
-  status_ = debugStatus("START");
+  status_ = debugStatus("HEAD1");
   state_ = State::Starting;
-  if (!hasBleStartHeadroom()) {
-    state_ = State::Error;
-    error_ = tr(STR_MEMORY_ERROR);
-    return;
+}
+
+bool BluetoothPairingActivity::advanceStartScan() {
+  if (state_ != State::Starting || !scanStarted_) return false;
+
+  switch (startStep_) {
+    case StartStep::Wait:
+      startStep_ = StartStep::Headroom1;
+      status_ = debugStatus("HEAD1");
+      requestUpdate();
+      return false;
+
+    case StartStep::Headroom1:
+      if (!hasBleStartHeadroom()) {
+        state_ = State::Error;
+        error_ = tr(STR_MEMORY_ERROR);
+        return true;
+      }
+      startStep_ = StartStep::PowerLock;
+      status_ = debugStatus("PWR");
+      requestUpdate();
+      return false;
+
+    case StartStep::PowerLock:
+      if (!powerLock_) {
+        powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
+        if (!powerLock_) {
+          state_ = State::Error;
+          error_ = tr(STR_MEMORY_ERROR);
+          return true;
+        }
+      }
+      startStep_ = StartStep::WifiOff;
+      status_ = debugStatus("WIFI");
+      requestUpdate();
+      return false;
+
+    case StartStep::WifiOff:
+      if (WiFi.getMode() != WIFI_MODE_NULL) {
+        WiFi.disconnect(true);
+        WiFi.mode(WIFI_OFF);
+        delay(200);
+      }
+      startStep_ = StartStep::Headroom2;
+      status_ = debugStatus("HEAD2");
+      requestUpdate();
+      return false;
+
+    case StartStep::Headroom2:
+      if (!hasBleStartHeadroom()) {
+        state_ = State::Error;
+        error_ = tr(STR_MEMORY_ERROR);
+        return true;
+      }
+      startStep_ = StartStep::Begin;
+      status_ = debugStatus("BEGIN");
+      requestUpdate();
+      return false;
+
+    case StartStep::Begin:
+      if (!BleHid.begin("CrossPoint X4")) {
+        state_ = State::Error;
+        error_ = tr(STR_BLUETOOTH_UNAVAILABLE);
+        LOG_ERR(TAG, "BLE HID host begin failed");
+        return true;
+      }
+      startStep_ = StartStep::StartScan;
+      status_ = debugStatus("SCANST");
+      requestUpdate();
+      return false;
+
+    case StartStep::StartScan:
+      BleHid.releaseScanResults();
+      BleHid.startScan(SCAN_MS);
+      startStep_ = StartStep::Verify;
+      status_ = debugStatus("VERIFY");
+      requestUpdate();
+      return false;
+
+    case StartStep::Verify:
+      delay(20);
+      BleHid.poll();
+      if (!BleHid.isScanning()) {
+        state_ = State::Error;
+        error_ = tr(STR_BLUETOOTH_SCAN_FAILED);
+        LOG_ERR(TAG, "BLE scan did not start");
+        return true;
+      }
+      scanStartedMs_ = millis();
+      lastScanUpdateMs_ = 0;
+      state_ = State::Scanning;
+      status_ = debugStatus("SCAN");
+      requestUpdate();
+      return true;
   }
-  if (!powerLock_) {
-    powerLock_ = makeUniqueNoThrow<HalPowerManager::Lock>();
-    if (!powerLock_) {
-      state_ = State::Error;
-      error_ = tr(STR_MEMORY_ERROR);
-      return;
-    }
+  return false;
+}
+
+const char* BluetoothPairingActivity::startStepLabel() const {
+  switch (startStep_) {
+    case StartStep::Wait:
+      return "WAIT";
+    case StartStep::Headroom1:
+      return "HEAD1";
+    case StartStep::PowerLock:
+      return "PWR";
+    case StartStep::WifiOff:
+      return "WIFI";
+    case StartStep::Headroom2:
+      return "HEAD2";
+    case StartStep::Begin:
+      return "BEGIN";
+    case StartStep::StartScan:
+      return "SCANST";
+    case StartStep::Verify:
+      return "VERIFY";
   }
-  if (WiFi.getMode() != WIFI_MODE_NULL) {
-    WiFi.disconnect(true);
-    WiFi.mode(WIFI_OFF);
-    delay(200);
-  }
-  if (!hasBleStartHeadroom()) {
-    state_ = State::Error;
-    error_ = tr(STR_MEMORY_ERROR);
-    return;
-  }
-  if (!BleHid.begin("CrossPoint X4")) {
-    state_ = State::Error;
-    error_ = tr(STR_BLUETOOTH_UNAVAILABLE);
-    LOG_ERR(TAG, "BLE HID host begin failed");
-    return;
-  }
-  BleHid.releaseScanResults();
-  BleHid.startScan(SCAN_MS);
-  delay(20);
-  BleHid.poll();
-  if (!BleHid.isScanning()) {
-    state_ = State::Error;
-    error_ = tr(STR_BLUETOOTH_SCAN_FAILED);
-    LOG_ERR(TAG, "BLE scan did not start");
-    return;
-  }
-  scanStartedMs_ = millis();
-  lastScanUpdateMs_ = 0;
-  state_ = State::Scanning;
-  status_ = debugStatus("SCAN");
+  return "?";
 }
 
 const char* BluetoothPairingActivity::stateLabel() const {
@@ -128,10 +205,11 @@ const char* BluetoothPairingActivity::stateLabel() const {
 
 std::string BluetoothPairingActivity::debugStatus(const char* state) const {
   const auto dbg = BleHid.scanDebugStats();
-  char buf[96];
-  snprintf(buf, sizeof(buf), "%s DBG dev=%u seen=%lu ok=%lu filt=%lu", state,
+  char buf[128];
+  snprintf(buf, sizeof(buf), "%s DBG dev=%u seen=%lu ok=%lu filt=%lu heap=%lu max=%lu", state,
            static_cast<unsigned>(BleHid.deviceCount()), static_cast<unsigned long>(dbg.seen),
-           static_cast<unsigned long>(dbg.accepted), static_cast<unsigned long>(dbg.filtered));
+           static_cast<unsigned long>(dbg.accepted), static_cast<unsigned long>(dbg.filtered),
+           static_cast<unsigned long>(ESP.getFreeHeap()), static_cast<unsigned long>(ESP.getMaxAllocHeap()));
   return buf;
 }
 
@@ -141,7 +219,7 @@ int BluetoothPairingActivity::itemCount() const {
 }
 
 std::string BluetoothPairingActivity::itemLabel(int index) const {
-  if (state_ == State::Starting) return debugStatus("START");
+  if (state_ == State::Starting) return debugStatus(startStepLabel());
   if (state_ != State::Scanning) return status_.empty() ? error_ : status_;
   const uint8_t count = BleHid.deviceCount();
   if (count == 0) {
@@ -163,6 +241,13 @@ std::string BluetoothPairingActivity::itemLabel(int index) const {
 }
 
 std::string BluetoothPairingActivity::scanStatus() const {
+  if (state_ == State::Starting) {
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s t=%lus heap=%lu max=%lu", startStepLabel(),
+             static_cast<unsigned long>((millis() - enteredMs_) / 1000), static_cast<unsigned long>(ESP.getFreeHeap()),
+             static_cast<unsigned long>(ESP.getMaxAllocHeap()));
+    return buf;
+  }
   if (state_ != State::Scanning) return debugStatus(stateLabel());
   const unsigned long elapsed = millis() - scanStartedMs_;
   const unsigned long remaining = elapsed < SCAN_MS ? (SCAN_MS - elapsed + 999) / 1000 : 0;
@@ -189,6 +274,11 @@ void BluetoothPairingActivity::loop() {
   if (state_ == State::Starting && !scanStarted_ && millis() - enteredMs_ >= DEFER_BLE_START_MS) {
     startScan();
     requestUpdate();
+    return;
+  }
+
+  if (state_ == State::Starting && scanStarted_) {
+    advanceStartScan();
     return;
   }
 

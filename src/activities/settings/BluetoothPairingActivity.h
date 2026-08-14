@@ -24,8 +24,10 @@ class BluetoothPairingActivity final : public Activity {
 
  private:
   enum class State { Starting, Scanning, Connecting, Connected, Error };
+  enum class StartStep { Wait, Headroom1, PowerLock, WifiOff, Headroom2, Begin, StartScan, Verify };
 
   State state_ = State::Starting;
+  StartStep startStep_ = StartStep::Wait;
   ButtonNavigator buttonNavigator_;
   int selectedIndex_ = 0;
   std::string status_;
@@ -39,6 +41,8 @@ class BluetoothPairingActivity final : public Activity {
 
   int itemCount() const;
   void startScan();
+  bool advanceStartScan();
+  const char* startStepLabel() const;
   bool hasBleStartHeadroom() const;
   void connectSelected();
   const char* stateLabel() const;
