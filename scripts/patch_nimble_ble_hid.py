@@ -90,6 +90,83 @@ def patch_nimble_for_crosspoint_ble_hid():
     # that are needed by Kay's X4 firmware are applied to the symlinked SDK source
     # during the PlatformIO build, so the main repo remains self-contained.
     host = project_dir / "freeink-sdk/libs/network/BleKeyboardHost/src/BleKeyboardHost.cpp"
+    scan_cb_old = """class ScanCB : public NimBLEScanCallbacks {
+  void onResult(const NimBLEAdvertisedDevice* dev) override {
+    if (!dev) return;
+    // Store named/HID advertisers by default; optionally keep anonymous
+    // non-HID probe candidates during bring-up. HID is still validated at
+    // connect time. The name falls back to the address. Keep the callback cheap
+    // so heavy logging can't choke the C3's advertisement-report queue.
+    const std::string a = dev->getAddress().toString();
+    const bool named = dev->haveName();
+    const std::string nm = named ? dev->getName() : a;
+    const uint8_t type = dev->getAddress().getType();
+    const int rssi = dev->getRSSI();
+    const uint16_t appearance = dev->haveAppearance() ? dev->getAppearance() : 0;
+    const bool keyboardAppearance = appearance == kAppearanceKeyboard;
+    const bool connectable = dev->isConnectable();
+    const bool hid = dev->isAdvertisingService(NimBLEUUID(kHidService)) || keyboardAppearance;
+#if FREEINK_BLE_HID_SCAN_DEBUG
+    if (named || hid || connectable) {
+      Serial.printf(\"[BLE adv] %s  name='%s'  rssi=%d  hid=%d  app=0x%04x  conn=%d  addrType=%u\",
+                    a.c_str(), nm.c_str(), rssi, hid ? 1 : 0, appearance, connectable ? 1 : 0, type);
+#if CONFIG_BT_NIMBLE_EXT_ADV
+      Serial.printf(\"  legacy=%d  advType=0x%02x  data=%u  phy=%u/%u  len=%u\", dev->isLegacyAdvertisement() ? 1 : 0,
+                    dev->getAdvType(), dev->getDataStatus(), dev->getPrimaryPhy(), dev->getSecondaryPhy(),
+                    dev->getAdvLength());
+#else
+      Serial.printf(\"  advType=0x%02x  len=%u\", dev->getAdvType(), dev->getAdvLength());
+#endif
+      printPayloadHex(dev);
+      Serial.println();
+    }
+#endif
+    self().onScanResultIngest(a.c_str(), nm.c_str(), rssi, type, hid, connectable);
+  }
+};"""
+    scan_cb_new = """class ScanCB : public NimBLEScanCallbacks {
+  static void ingestAdvertisement(const NimBLEAdvertisedDevice* dev, bool finalResult) {
+    if (!dev) return;
+    // Store probe candidates as soon as the primary advertisement is discovered,
+    // then let the later scan-response/final result upgrade the same address with
+    // a real name or HID flag. Some page-turners/keyboards keep the UI empty for
+    // the whole scan if we wait only for onResult(): active-scan scannable devices
+    // are held while NimBLE waits for scan-response data, and some peripherals do
+    // not answer that request promptly. HID is still validated at connect time.
+    const std::string a = dev->getAddress().toString();
+    const bool named = dev->haveName();
+    const std::string nm = named ? dev->getName() : a;
+    const uint8_t type = dev->getAddress().getType();
+    const int rssi = dev->getRSSI();
+    const uint16_t appearance = dev->haveAppearance() ? dev->getAppearance() : 0;
+    const bool keyboardAppearance = appearance == kAppearanceKeyboard;
+    const bool connectable = dev->isConnectable();
+    const bool hid = dev->isAdvertisingService(NimBLEUUID(kHidService)) || keyboardAppearance;
+#if FREEINK_BLE_HID_SCAN_DEBUG
+    if (named || hid || connectable) {
+      Serial.printf(\"[BLE adv%s] %s  name='%s'  rssi=%d  hid=%d  app=0x%04x  conn=%d  addrType=%u\",
+                    finalResult ? \" final\" : \" seen\", a.c_str(), nm.c_str(), rssi, hid ? 1 : 0, appearance,
+                    connectable ? 1 : 0, type);
+#if CONFIG_BT_NIMBLE_EXT_ADV
+      Serial.printf(\"  legacy=%d  advType=0x%02x  data=%u  phy=%u/%u  len=%u\", dev->isLegacyAdvertisement() ? 1 : 0,
+                    dev->getAdvType(), dev->getDataStatus(), dev->getPrimaryPhy(), dev->getSecondaryPhy(),
+                    dev->getAdvLength());
+#else
+      Serial.printf(\"  advType=0x%02x  len=%u\", dev->getAdvType(), dev->getAdvLength());
+#endif
+      printPayloadHex(dev);
+      Serial.println();
+    }
+#endif
+    self().onScanResultIngest(a.c_str(), nm.c_str(), rssi, type, hid, connectable);
+  }
+
+  void onDiscovered(const NimBLEAdvertisedDevice* dev) override { ingestAdvertisement(dev, false); }
+
+  void onResult(const NimBLEAdvertisedDevice* dev) override { ingestAdvertisement(dev, true); }
+};"""
+    if patch_file(host, [(scan_cb_old, scan_cb_new)]):
+        print("Patched BLE HID scanner to show primary discoveries before scan responses")
     if patch_file(host, [
         (
             "  if (!addr) return;\n  // A \"real\" name (not the address fallback) should never be downgraded back to\n",
