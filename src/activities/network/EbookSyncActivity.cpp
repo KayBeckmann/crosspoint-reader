@@ -273,8 +273,10 @@ bool EbookSyncActivity::fetchAndParseList() {
   LOG_DBG(TAG, "Loaded %zu eBook entries", entries_.size());
   updateHeartbeat(tr(STR_EBOOK_SYNC_PARSING), true);
   if (!uploadPendingNotes()) {
-    char buf[64];
-    snprintf(buf, sizeof(buf), "Notes upload failed HTTP %d", lastNotesUploadCode_);
+    char buf[128];
+    const char* filename = lastNotesUploadName_.empty() ? "-" : lastNotesUploadName_.c_str();
+    snprintf(buf, sizeof(buf), "Notes n=%u file=%s HTTP %d", static_cast<unsigned>(foundNotes_), filename,
+             lastNotesUploadCode_);
     errorMessage_ = buf;
     return false;
   }
@@ -412,6 +414,8 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
 bool EbookSyncActivity::uploadPendingNotes() {
   uploadedNotes_ = 0;
   deletedNotes_ = 0;
+  foundNotes_ = 0;
+  lastNotesUploadName_.clear();
   if (!Storage.exists(NOTES_DIR)) return true;
   auto dir = Storage.open(NOTES_DIR);
   if (!dir || !dir.isDirectory()) return false;
@@ -424,6 +428,8 @@ bool EbookSyncActivity::uploadPendingNotes() {
     if (isDir) continue;
     std::string filename{name};
     if (filename.size() < 3 || filename.substr(filename.size() - 3) != ".md") continue;
+    foundNotes_++;
+    lastNotesUploadName_ = filename;
     const std::string path = std::string(NOTES_DIR) + "/" + filename;
     statusMessage_ = std::string(tr(STR_NOTE_SYNC_UPLOADING)) + " " + filename;
     fileProgress_ = 0;
