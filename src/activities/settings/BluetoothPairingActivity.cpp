@@ -116,11 +116,18 @@ int BluetoothPairingActivity::itemCount() const {
 std::string BluetoothPairingActivity::itemLabel(int index) const {
   if (state_ != State::Scanning) return status_.empty() ? error_ : status_;
   const uint8_t count = BleHid.deviceCount();
-  if (count == 0) return tr(STR_BLUETOOTH_NO_DEVICES);
+  if (count == 0) {
+    const auto dbg = BleHid.scanDebugStats();
+    if (dbg.seen == 0) return tr(STR_BLUETOOTH_NO_DEVICES);
+    char buf[96];
+    snprintf(buf, sizeof(buf), "Last: %s %ddBm%s%s%s", dbg.lastName[0] ? dbg.lastName : dbg.lastAddr, dbg.lastRssi,
+             dbg.lastAccepted ? "" : " filtered", dbg.lastConnectable ? " conn" : "", dbg.lastHid ? " HID" : "");
+    return buf;
+  }
   if (index < 0 || index >= count) return "";
   const auto& d = BleHid.device(static_cast<uint8_t>(index));
   char buf[96];
-  snprintf(buf, sizeof(buf), "%s %ddBm%s", d.name, d.rssi, d.hid ? " HID" : "");
+  snprintf(buf, sizeof(buf), "%s %ddBm%s%s", d.name, d.rssi, d.connectable ? " conn" : "", d.hid ? " HID" : "");
   return buf;
 }
 
@@ -128,9 +135,11 @@ std::string BluetoothPairingActivity::scanStatus() const {
   if (state_ != State::Scanning) return status_;
   const unsigned long elapsed = millis() - scanStartedMs_;
   const unsigned long remaining = elapsed < SCAN_MS ? (SCAN_MS - elapsed + 999) / 1000 : 0;
-  char buf[80];
-  snprintf(buf, sizeof(buf), "%s %u (%lus)", tr(STR_BLUETOOTH_SCANNING), static_cast<unsigned>(BleHid.deviceCount()),
-           remaining);
+  const auto dbg = BleHid.scanDebugStats();
+  char buf[128];
+  snprintf(buf, sizeof(buf), "%s dev=%u seen=%lu ok=%lu filt=%lu (%lus)", tr(STR_BLUETOOTH_SCANNING),
+           static_cast<unsigned>(BleHid.deviceCount()), static_cast<unsigned long>(dbg.seen),
+           static_cast<unsigned long>(dbg.accepted), static_cast<unsigned long>(dbg.filtered), remaining);
   return buf;
 }
 
