@@ -16,6 +16,7 @@
 
 namespace {
 constexpr unsigned long SCAN_MS = 8000;
+constexpr unsigned long RESCAN_DELAY_MS = 1200;
 constexpr unsigned long DEFER_BLE_START_MS = 500;
 // NimBLE allocates several RTOS objects during startup before the HID host can
 // report a normal failure. The X4 crash report from 1d0bf6c showed a FreeRTOS
@@ -166,9 +167,9 @@ std::string BluetoothPairingActivity::scanStatus() const {
   const unsigned long remaining = elapsed < SCAN_MS ? (SCAN_MS - elapsed + 999) / 1000 : 0;
   const auto dbg = BleHid.scanDebugStats();
   char buf[128];
-  snprintf(buf, sizeof(buf), "SCAN dev=%u seen=%lu ok=%lu filt=%lu (%lus)", static_cast<unsigned>(BleHid.deviceCount()),
-           static_cast<unsigned long>(dbg.seen), static_cast<unsigned long>(dbg.accepted),
-           static_cast<unsigned long>(dbg.filtered), remaining);
+  snprintf(buf, sizeof(buf), "%s dev=%u seen=%lu ok=%lu filt=%lu (%lus)", BleHid.isScanning() ? "SCAN" : "DONE",
+           static_cast<unsigned>(BleHid.deviceCount()), static_cast<unsigned long>(dbg.seen),
+           static_cast<unsigned long>(dbg.accepted), static_cast<unsigned long>(dbg.filtered), remaining);
   return buf;
 }
 
@@ -210,7 +211,13 @@ void BluetoothPairingActivity::loop() {
       requestUpdate();
     }
     if (!BleHid.isScanning() || millis() - scanStartedMs_ > SCAN_MS + 500) {
-      status_ = count == 0 ? tr(STR_BLUETOOTH_NO_DEVICES) : tr(STR_BLUETOOTH_SELECT_DEVICE);
+      if (count == 0 && millis() - scanStartedMs_ > SCAN_MS + RESCAN_DELAY_MS) {
+        BleHid.releaseScanResults();
+        BleHid.startScan(SCAN_MS);
+        scanStartedMs_ = millis();
+        lastScanUpdateMs_ = 0;
+      }
+      status_ = count == 0 ? debugStatus("DONE") : tr(STR_BLUETOOTH_SELECT_DEVICE);
       requestUpdate();
     }
     buttonNavigator_.onNextRelease([this] {
