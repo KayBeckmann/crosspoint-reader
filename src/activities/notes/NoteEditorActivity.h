@@ -1,5 +1,6 @@
 #pragma once
 
+#include <BleKeyboardHost.h>
 #include <HalPowerManager.h>
 
 #include <string>
@@ -41,6 +42,7 @@ class NoteEditorActivity final : public Activity {
   bool save();
   void insertChar(char ch);
   void insertText(const char* s);
+  const char* germanTextForKey(const freeink::KeyEvent& ev) const;
   void backspace();
   void moveCursorLeft();
   void moveCursorRight();
