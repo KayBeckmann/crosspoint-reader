@@ -69,14 +69,15 @@ void BluetoothPairingActivity::startScan() {
   auto showStartStep = [this](StartStep step, const char* label) {
     startStep_ = step;
     status_ = debugStatus(label);
-    requestUpdateAndWait();
+    requestUpdate(true);
+    delay(250);
   };
 
   showStartStep(StartStep::Headroom1, "HEAD1");
   if (!hasBleStartHeadroom()) {
     state_ = State::Error;
     error_ = tr(STR_MEMORY_ERROR);
-    requestUpdateAndWait();
+    requestUpdate(true);
     return;
   }
 
@@ -86,7 +87,7 @@ void BluetoothPairingActivity::startScan() {
     if (!powerLock_) {
       state_ = State::Error;
       error_ = tr(STR_MEMORY_ERROR);
-      requestUpdateAndWait();
+      requestUpdate(true);
       return;
     }
   }
@@ -102,7 +103,7 @@ void BluetoothPairingActivity::startScan() {
   if (!hasBleStartHeadroom()) {
     state_ = State::Error;
     error_ = tr(STR_MEMORY_ERROR);
-    requestUpdateAndWait();
+    requestUpdate(true);
     return;
   }
 
@@ -111,7 +112,7 @@ void BluetoothPairingActivity::startScan() {
     state_ = State::Error;
     error_ = tr(STR_BLUETOOTH_UNAVAILABLE);
     LOG_ERR(TAG, "BLE HID host begin failed");
-    requestUpdateAndWait();
+    requestUpdate(true);
     return;
   }
 
@@ -126,14 +127,14 @@ void BluetoothPairingActivity::startScan() {
     state_ = State::Error;
     error_ = tr(STR_BLUETOOTH_SCAN_FAILED);
     LOG_ERR(TAG, "BLE scan did not start");
-    requestUpdateAndWait();
+    requestUpdate(true);
     return;
   }
   scanStartedMs_ = millis();
   lastScanUpdateMs_ = 0;
   state_ = State::Scanning;
   status_ = debugStatus("SCAN");
-  requestUpdateAndWait();
+  requestUpdate(true);
 }
 
 bool BluetoothPairingActivity::advanceStartScan() {
