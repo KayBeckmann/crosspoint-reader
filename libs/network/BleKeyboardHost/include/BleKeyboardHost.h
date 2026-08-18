@@ -151,7 +151,7 @@ class BleKeyboardHost {
   // public header free of NimBLE types — the .cpp translates BLE objects into
   // these plain calls. -------------------------------------------------------
   void onScanResultIngest(const char* addr, const char* name, int rssi, uint8_t type, bool hid, bool connectable);
-  void onReportIngest(const uint8_t* data, size_t len);
+  void onReportIngest(const uint8_t* data, size_t len, uint8_t knownReportId = 0);
   void onLinkUp(const char* addr, const char* name, uint8_t type);
   void onLinkDown();
   void onConnectFailed(const char* reason);

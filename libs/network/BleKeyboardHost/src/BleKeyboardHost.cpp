@@ -80,7 +80,35 @@ uint8_t g_recentKeyboardMods = 0;      // short-lived modifier-only keyboard rep
 uint32_t g_recentKeyboardModsMs = 0;
 volatile uint32_t g_lastReportMs = 0;  // millis() of the last HID notification (stale-release)
 
+struct ReportIdBinding {
+  uint16_t handle = 0;
+  uint8_t reportId = 0;
+};
+ReportIdBinding g_reportIdBindings[8];
+uint8_t g_reportIdBindingCount = 0;
+
 BleKeyboardHost& self() { return BleKeyboardHost::getInstance(); }
+
+void rememberReportId(NimBLERemoteCharacteristic* chr, uint8_t reportId) {
+  if (!chr || g_reportIdBindingCount >= sizeof(g_reportIdBindings) / sizeof(g_reportIdBindings[0])) return;
+  const uint16_t handle = chr->getHandle();
+  for (uint8_t i = 0; i < g_reportIdBindingCount; ++i) {
+    if (g_reportIdBindings[i].handle == handle) {
+      g_reportIdBindings[i].reportId = reportId;
+      return;
+    }
+  }
+  g_reportIdBindings[g_reportIdBindingCount++] = ReportIdBinding{handle, reportId};
+}
+
+uint8_t reportIdFor(NimBLERemoteCharacteristic* chr) {
+  if (!chr) return 0;
+  const uint16_t handle = chr->getHandle();
+  for (uint8_t i = 0; i < g_reportIdBindingCount; ++i) {
+    if (g_reportIdBindings[i].handle == handle) return g_reportIdBindings[i].reportId;
+  }
+  return 0;
+}
 
 // Scan a HID Report Map descriptor for Usage Page (0x05 nn) items and note whether
 // a keyboard (0x07) or consumer (0x0C) page is present, plus a heuristic byte index
@@ -151,8 +179,8 @@ void printPayloadHex(const NimBLEAdvertisedDevice* dev) {
 }
 #endif
 
-void onHidNotify(NimBLERemoteCharacteristic*, uint8_t* data, size_t len, bool) {
-  self().onReportIngest(data, len);
+void onHidNotify(NimBLERemoteCharacteristic* chr, uint8_t* data, size_t len, bool) {
+  self().onReportIngest(data, len, reportIdFor(chr));
 }
 
 bool setupHid(NimBLEClient* client) {
@@ -172,6 +200,8 @@ bool setupHid(NimBLEClient* client) {
   g_hasConsumerPage = false;
   g_preferredByteIndex = 0xFF;
   g_lastGenericCode = 0;
+  g_reportIdBindingCount = 0;
+  memset(g_reportIdBindings, 0, sizeof(g_reportIdBindings));
   if (NimBLERemoteCharacteristic* rmap = hid->getCharacteristic(NimBLEUUID(kCharReportMap))) {
     if (rmap->canRead()) {
       NimBLEAttValue v = rmap->readValue();
@@ -188,14 +218,24 @@ bool setupHid(NimBLEClient* client) {
   for (NimBLERemoteCharacteristic* c : chars) {
     if (!c) continue;
     if (c->getUUID() != NimBLEUUID(kCharReport) || !c->canNotify()) continue;
-    // Report Reference descriptor (0x2908) byte[1] is the report type: 1=Input.
+    // Report Reference descriptor (0x2908): byte[0] is report id, byte[1]
+    // is report type (1=Input). MicroSlate's BLE host learns this id during
+    // discovery and strips only that exact prefix; doing the same avoids
+    // guessing away a real modifier byte such as Shift=0x02.
     bool isInput = true;
+    uint8_t reportId = 0;
     NimBLERemoteDescriptor* ref = c->getDescriptor(NimBLEUUID(kDescReportReference));
     if (ref) {
       NimBLEAttValue v = ref->readValue();
-      if (v.size() >= 2 && v[1] != 0x01) isInput = false;
+      if (v.size() >= 2) {
+        reportId = static_cast<uint8_t>(v[0]);
+        if (static_cast<uint8_t>(v[1]) != 0x01) isInput = false;
+      }
     }
-    if (isInput && c->subscribe(true, onHidNotify)) subscribed = true;
+    if (isInput && c->subscribe(true, onHidNotify)) {
+      rememberReportId(c, reportId);
+      subscribed = true;
+    }
   }
 
   if (!subscribed) {  // fallback: boot keyboard input report
@@ -664,7 +704,7 @@ void BleKeyboardHost::emitUsage(uint8_t usage, uint8_t mods) {
 }
 
 // --- Internal hooks from the BLE backend -------------------------------------
-void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
+void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len, uint8_t knownReportId) {
   if (!data || len == 0) return;
   g_lastReportMs = millis();  // freshness for the stale-release timeout in poll()
 
@@ -694,14 +734,21 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
   }
 #endif
 
-  // Normalize: strip a leading report id only when byte 0 actually looks
-  // like a report id. Boot/report-protocol keyboard reports are
-  // [mod][reserved][k0..k5] (8 bytes); some keyboards append one trailing byte
-  // (9 bytes) without a report id. Blindly stripping every 9-byte report drops
-  // the modifier byte, which makes Shift/AltGr disappear while letters still
-  // work.
+  // Normalize report-id prefix. Borrowed from MicroSlate's working host path:
+  // learn the Report Reference descriptor during HID discovery, then strip only
+  // that exact ID. This prevents Shift-only reports (02 00 00 ...) from being
+  // mistaken for "report id 2" and losing the modifier byte.
   const uint8_t* p = data;
   size_t n = len;
+  if (knownReportId != 0 && n > 0 && p[0] == knownReportId) {
+    p += 1;
+    n -= 1;
+  }
+
+  // Fallback for devices where no Report Reference descriptor was available:
+  // strip a leading report id only when byte 0 actually looks like a report id.
+  // Boot/report-protocol keyboard reports are [mod][reserved][k0..k5] (8 bytes);
+  // some keyboards append one trailing byte (9 bytes) without a report id.
   const auto looksLikeReportIdPrefix = [](const uint8_t* r, size_t l) -> bool {
     if (l < 8 || r[0] == 0) return false;
     // Ambiguous 9-byte reports from some keyboards are [mod][reserved][k0..k5][trailer].
