@@ -4,22 +4,23 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "network/HttpDownloader.h"
 #include "util/ButtonNavigator.h"
 
 #ifndef X4_EBOOKS_LIST_URL
-#define X4_EBOOKS_LIST_URL "https://n8n.beckmann-md.de/webhook/x4-ebooks-list"
+#define X4_EBOOKS_LIST_URL "https://n8n.skaldify.com/webhook/x4-ebooks-list"
 #endif
 
 #ifndef X4_EBOOKS_DOWNLOAD_URL
-#define X4_EBOOKS_DOWNLOAD_URL "https://n8n.beckmann-md.de/webhook/x4-ebooks-download"
+#define X4_EBOOKS_DOWNLOAD_URL "https://n8n.skaldify.com/webhook/x4-ebooks-download"
 #endif
 
 #ifndef X4_EBOOKS_ACK_URL
-#define X4_EBOOKS_ACK_URL "https://n8n.beckmann-md.de/webhook/x4-ebooks-ack"
+#define X4_EBOOKS_ACK_URL "https://n8n.skaldify.com/webhook/x4-ebooks-ack"
 #endif
 
 #ifndef X4_NOTES_UPLOAD_URL
-#define X4_NOTES_UPLOAD_URL "https://n8n.beckmann-md.de/webhook/x4-notes-upload"
+#define X4_NOTES_UPLOAD_URL "https://n8n.skaldify.com/webhook/x4-notes-upload"
 #endif
 
 class EbookSyncActivity : public Activity {
@@ -69,7 +70,12 @@ class EbookSyncActivity : public Activity {
   size_t deletedNotes_ = 0;
   size_t foundNotes_ = 0;
   int lastNotesUploadCode_ = 0;
+  size_t lastNotesUploadBytes_ = 0;
   std::string lastNotesUploadName_;
+  int lastDownloadCode_ = 0;
+  bool lastDownloadIsCover_ = false;
+  std::string lastDownloadName_;
+  std::string lastDownloadPath_;
   std::string statusMessage_;
   std::string errorMessage_;
   bool cancelRequested_ = false;
@@ -79,6 +85,7 @@ class EbookSyncActivity : public Activity {
   std::string progressDetail() const;
   bool fetchAndParseList();
   void setNotesUploadErrorMessage();
+  void setDownloadErrorMessage(HttpDownloader::DownloadError result, const EbookEntry& entry);
   void syncAllNew();
   bool downloadEntry(EbookEntry& entry);
   bool acknowledgeDownload(const EbookEntry& entry);

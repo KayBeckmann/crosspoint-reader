@@ -23,12 +23,14 @@ class KeyboardEntryActivity : public Activity {
  public:
   explicit KeyboardEntryActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                                  std::string title = "Enter Text", std::string initialText = "",
-                                 const size_t maxLength = 0, InputType inputType = InputType::Text)
+                                 const size_t maxLength = 0, InputType inputType = InputType::Text,
+                                 bool keepBleAliveOnComplete = false)
       : Activity("KeyboardEntry", renderer, mappedInput),
         title(std::move(title)),
         text(std::move(initialText)),
         maxLength(maxLength),
-        inputType(inputType) {}
+        inputType(inputType),
+        keepBleAliveOnComplete(keepBleAliveOnComplete) {}
 
   void onEnter() override;
   void onExit() override;
@@ -92,6 +94,8 @@ class KeyboardEntryActivity : public Activity {
   unsigned long hintShowTime = 0;
   bool bleStarted = false;
   bool bleConnectIssued = false;
+  bool completedSuccessfully = false;
+  bool keepBleAliveOnComplete = false;
   unsigned long lastBleReconnectMs = 0;
   std::unique_ptr<HalPowerManager::Lock> powerLock;
 

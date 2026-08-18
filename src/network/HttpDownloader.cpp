@@ -37,9 +37,21 @@ struct Sink {
   std::function<bool(const uint8_t*, size_t)> write;  // returns false to abort the transfer
   HttpDownloader::ProgressCallback progress;
   bool* cancelFlag = nullptr;
+  unsigned long noProgressTimeoutMs = 0;
+  unsigned long lastDataMs = 0;
+  bool stalled = false;
   size_t total = 0;
   size_t downloaded = 0;
 };
+
+bool shouldAbortTransfer(Sink& sink) {
+  if (sink.cancelFlag && *sink.cancelFlag) return true;
+  if (sink.noProgressTimeoutMs > 0 && sink.lastDataMs > 0 && millis() - sink.lastDataMs > sink.noProgressTimeoutMs) {
+    sink.stalled = true;
+    return true;
+  }
+  return false;
+}
 
 bool isRedirect(int status) {
   return status == 301 || status == 302 || status == 303 || status == 307 || status == 308;
@@ -75,12 +87,13 @@ HttpDownloader::DownloadError runGetWolf(const std::string& startUrl, const std:
           if (sink.total == 0 && http.hasContentLength()) sink.total = http.getContentLength();
           if (!sink.write(data, len)) return false;
           sink.downloaded += len;
+          sink.lastDataMs = millis();
           if (sink.progress) sink.progress(sink.downloaded, sink.total);
           return true;
         },
-        [&sink]() { return sink.cancelFlag && *sink.cancelFlag; });
+        [&sink]() { return shouldAbortTransfer(sink); });
 
-    if (http.aborted()) return HttpDownloader::ABORTED;
+    if (http.aborted()) return sink.stalled ? HttpDownloader::STALLED : HttpDownloader::ABORTED;
     if (status < 0) {
       LOG_ERR("HTTP", "wolfSSL request failed: %s", url.c_str());
       return HttpDownloader::HTTP_ERROR;
@@ -191,6 +204,10 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       esp_http_client_cleanup(client);
       return HttpDownloader::ABORTED;
     }
+    if (shouldAbortTransfer(sink)) {
+      esp_http_client_cleanup(client);
+      return sink.stalled ? HttpDownloader::STALLED : HttpDownloader::ABORTED;
+    }
     const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
     if (read < 0) {
       LOG_ERR("HTTP", "read error after %zu bytes", sink.downloaded);
@@ -203,6 +220,7 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
       return HttpDownloader::FILE_ERROR;
     }
     sink.downloaded += read;
+    sink.lastDataMs = millis();
     if (sink.progress) sink.progress(sink.downloaded, sink.total);
   }
 
@@ -260,7 +278,8 @@ bool HttpDownloader::fetchUrl(const std::string& url, const DataCallback& onData
 
 HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& url, const std::string& destPath,
                                                              ProgressCallback progress, bool* cancelFlag,
-                                                             const std::string& username, const std::string& password) {
+                                                             const std::string& username, const std::string& password,
+                                                             unsigned long noProgressTimeoutMs) {
   LOG_DBG("HTTP", "Downloading: %s -> %s", url.c_str(), destPath.c_str());
 
   if (Storage.exists(destPath.c_str())) {
@@ -275,6 +294,8 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   Sink sink;
   sink.progress = std::move(progress);
   sink.cancelFlag = cancelFlag;
+  sink.noProgressTimeoutMs = noProgressTimeoutMs;
+  sink.lastDataMs = millis();
   sink.write = [&file](const uint8_t* data, size_t len) { return file.write(data, len) == len; };
 
   const DownloadError result = runGetSecure(url, username, password, sink);

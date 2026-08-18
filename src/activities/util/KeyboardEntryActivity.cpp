@@ -157,7 +157,7 @@ void KeyboardEntryActivity::onEnter() {
 
 void KeyboardEntryActivity::onExit() {
   Activity::onExit();
-  if (bleStarted) {
+  if (bleStarted && !(completedSuccessfully && keepBleAliveOnComplete && BleHid.isConnected())) {
     BleHid.end();
     bleStarted = false;
     bleConnectIssued = false;
@@ -1157,6 +1157,7 @@ void KeyboardEntryActivity::render(RenderLock&&) {
 }
 
 void KeyboardEntryActivity::onComplete(std::string text) {
+  completedSuccessfully = true;
   setResult(KeyboardResult{std::move(text)});
   finish();
 }

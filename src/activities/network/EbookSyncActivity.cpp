@@ -12,7 +12,9 @@
 #include <esp_http_client.h>
 
 #include <cctype>
+#include <cstring>
 
+#include "Bitmap.h"
 #include "MappedInputManager.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
@@ -25,11 +27,13 @@ namespace {
 constexpr const char* TAG = "EBOOK";
 constexpr const char* LIST_TMP = "/x4_ebooks_list.tmp";
 constexpr const char* DOWNLOAD_DIR = "/Download";
+constexpr const char* SLEEP_DIR = "/sleep";
 constexpr const char* NOTES_DIR = "/Notes";
 constexpr size_t MAX_LOCAL_NAME_BYTES = 100;
-constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 5;
-constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 1500;
-constexpr unsigned long HEARTBEAT_UPDATE_MS = 1500;
+constexpr int DOWNLOAD_PROGRESS_STEP_PERCENT = 10;
+constexpr unsigned long DOWNLOAD_PROGRESS_MIN_UPDATE_MS = 15000;
+constexpr unsigned long DOWNLOAD_NO_PROGRESS_TIMEOUT_MS = 45000;
+constexpr unsigned long HEARTBEAT_UPDATE_MS = 15000;
 
 std::string extensionOf(const std::string& path) {
   const auto slash = path.find_last_of('/');
@@ -44,7 +48,61 @@ bool isImageCoverExtension(const std::string& ext) {
   return ext == ".bmp" || ext == ".png" || ext == ".jpg" || ext == ".jpeg";
 }
 
-int postMarkdownDirect(const std::string& url, const std::string& filename, const std::string& body) {
+bool isSleepCoverType(const char* type) { return std::strcmp(type, "image") == 0 || std::strcmp(type, "cover") == 0; }
+
+std::string ensureBmpFilename(const std::string& filename) {
+  const std::string bmpExt = ".bmp";
+  std::string clean = StringUtils::sanitizeFilename(filename, MAX_LOCAL_NAME_BYTES);
+  if (extensionOf(clean) == bmpExt) return clean;
+
+  const size_t baseBudget = MAX_LOCAL_NAME_BYTES > bmpExt.size() ? MAX_LOCAL_NAME_BYTES - bmpExt.size() : 1;
+  clean = StringUtils::sanitizeFilename(filename, baseBudget);
+  const auto dot = clean.find_last_of('.');
+  if (dot != std::string::npos) clean.resize(dot);
+  if (clean.empty()) clean = "cover";
+  if (clean.size() + bmpExt.size() > MAX_LOCAL_NAME_BYTES) {
+    clean.resize(MAX_LOCAL_NAME_BYTES - bmpExt.size());
+  }
+  return clean + bmpExt;
+}
+
+std::string syncLocalPath(const std::string& filename, const bool isCover) {
+  return std::string(isCover ? SLEEP_DIR : DOWNLOAD_DIR) + "/" + filename;
+}
+
+std::string dirnameOf(const std::string& path) {
+  const auto slash = path.find_last_of('/');
+  if (slash == std::string::npos || slash == 0) return slash == 0 ? "/" : "";
+  return path.substr(0, slash);
+}
+
+bool ensureDirectoryPath(const std::string& dir) {
+  if (dir.empty() || dir == "/" || Storage.exists(dir.c_str())) return true;
+  std::string current;
+  size_t pos = 0;
+  while (pos < dir.size()) {
+    const size_t slash = dir.find('/', pos + (dir[pos] == '/' ? 1 : 0));
+    current = slash == std::string::npos ? dir : dir.substr(0, slash);
+    if (!current.empty() && current != "/" && !Storage.exists(current.c_str()) && !Storage.mkdir(current.c_str())) {
+      LOG_ERR(TAG, "Failed to create directory: %s", current.c_str());
+      return false;
+    }
+    if (slash == std::string::npos) break;
+    pos = slash;
+  }
+  return true;
+}
+
+bool isReadableBmp(const std::string& path) {
+  HalFile file;
+  if (!Storage.openFileForRead(TAG, path.c_str(), file)) return false;
+  Bitmap bitmap(file);
+  const bool ok = bitmap.parseHeaders() == BmpReaderError::Ok;
+  file.close();
+  return ok;
+}
+
+int postJsonDirect(const std::string& url, const std::string& body) {
   if (url.rfind("https://", 0) != 0) return -1002;
 
   esp_http_client_config_t config = {};
@@ -60,8 +118,7 @@ int postMarkdownDirect(const std::string& url, const std::string& filename, cons
 
   esp_http_client_set_method(client, HTTP_METHOD_POST);
   esp_http_client_set_header(client, "User-Agent", "CrossPoint-ESP32-" CROSSPOINT_VERSION);
-  esp_http_client_set_header(client, "Content-Type", "text/markdown; charset=utf-8");
-  esp_http_client_set_header(client, "X-X4-Note-Filename", filename.c_str());
+  esp_http_client_set_header(client, "Content-Type", "application/json; charset=utf-8");
 
   const esp_err_t err = esp_http_client_open(client, body.size());
   if (err != ESP_OK) {
@@ -261,15 +318,17 @@ bool EbookSyncActivity::fetchAndParseList() {
   for (JsonObject obj : arr) {
     const char* path = obj["path"] | "";
     const char* filename = obj["filename"] | "";
+    const char* type = obj["type"] | "";
     if (path[0] == '\0') continue;
     if (!isSupportedSyncAsset(path)) continue;
 
     EbookEntry entry;
     entry.path = path;
     entry.filename = filename[0] != '\0' ? filename : path;
-    entry.filename = ensureExtensionPreserved(entry.filename, entry.path);
-    entry.localPath = std::string(DOWNLOAD_DIR) + "/" + entry.filename;
-    entry.isCover = isImageCoverExtension(extensionOf(entry.path));
+    entry.isCover = isSleepCoverType(type) || isImageCoverExtension(extensionOf(entry.path));
+    entry.filename =
+        entry.isCover ? ensureBmpFilename(entry.filename) : ensureExtensionPreserved(entry.filename, entry.path);
+    entry.localPath = syncLocalPath(entry.filename, entry.isCover);
     entry.exists = Storage.exists(entry.localPath.c_str());
     if (entry.exists) skippedExisting_++;
     entries_.push_back(std::move(entry));
@@ -280,10 +339,14 @@ bool EbookSyncActivity::fetchAndParseList() {
     const char* coverFilename = obj["coverFilename"] | obj["coverName"] | "";
     cover.path = coverPath;
     cover.filename = coverFilename[0] != '\0' ? coverFilename : coverPath;
-    cover.filename = ensureExtensionPreserved(cover.filename, cover.path);
-    cover.localPath = std::string(DOWNLOAD_DIR) + "/" + cover.filename;
     cover.isCover = true;
-    cover.exists = Storage.exists(cover.localPath.c_str());
+    cover.filename = ensureBmpFilename(cover.filename);
+    // Kay's X4 sleep-screen rotation reads SD-card /sleep/*.bmp (no leading
+    // dot). Put server-converted cover BMPs there so synced covers participate
+    // in the normal rotating sleep-screen set.
+    cover.localPath = syncLocalPath(cover.filename, true);
+    cover.exists = Storage.exists(cover.localPath.c_str()) && isReadableBmp(cover.localPath);
+    if (Storage.exists(cover.localPath.c_str()) && !cover.exists) Storage.remove(cover.localPath.c_str());
     if (cover.exists) skippedExisting_++;
     entries_.push_back(std::move(cover));
   }
@@ -296,8 +359,21 @@ bool EbookSyncActivity::fetchAndParseList() {
 void EbookSyncActivity::setNotesUploadErrorMessage() {
   char buf[128];
   const char* filename = lastNotesUploadName_.empty() ? "-" : lastNotesUploadName_.c_str();
-  snprintf(buf, sizeof(buf), "Notes n=%u file=%s HTTP %d", static_cast<unsigned>(foundNotes_), filename,
-           lastNotesUploadCode_);
+  snprintf(buf, sizeof(buf), "Notes n=%u file=%s b=%u HTTP %d", static_cast<unsigned>(foundNotes_), filename,
+           static_cast<unsigned>(lastNotesUploadBytes_), lastNotesUploadCode_);
+  errorMessage_ = buf;
+}
+
+void EbookSyncActivity::setDownloadErrorMessage(const HttpDownloader::DownloadError result, const EbookEntry& entry) {
+  lastDownloadCode_ = static_cast<int>(result);
+  lastDownloadIsCover_ = entry.isCover;
+  lastDownloadName_ = entry.filename;
+  lastDownloadPath_ = entry.path;
+
+  char buf[96];
+  const char* kind = entry.isCover ? "cover" : "book";
+  snprintf(buf, sizeof(buf), "DL %s code=%d %u/%uKB", kind, lastDownloadCode_,
+           static_cast<unsigned>(fileProgress_ / 1024), static_cast<unsigned>(fileTotal_ / 1024));
   errorMessage_ = buf;
 }
 
@@ -305,8 +381,9 @@ int EbookSyncActivity::listItemCount() const { return entries_.empty() ? 1 : sta
 
 bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
   if (entry.exists) return true;
-  if (!Storage.exists(DOWNLOAD_DIR) && !Storage.mkdir(DOWNLOAD_DIR)) {
-    LOG_ERR(TAG, "Failed to create %s", DOWNLOAD_DIR);
+  const std::string targetDir = dirnameOf(entry.localPath);
+  if (!ensureDirectoryPath(targetDir)) {
+    LOG_ERR(TAG, "Failed to create %s", targetDir.c_str());
     errorMessage_ = tr(STR_EBOOK_SYNC_DIR_FAILED);
     return false;
   }
@@ -341,14 +418,15 @@ bool EbookSyncActivity::downloadEntry(EbookEntry& entry) {
           updateHeartbeat();
         }
       },
-      &cancelRequested_);
+      &cancelRequested_, "", "", DOWNLOAD_NO_PROGRESS_TIMEOUT_MS);
 
   if (result == HttpDownloader::ABORTED) {
+    setDownloadErrorMessage(result, entry);
     return false;
   }
   if (result != HttpDownloader::OK) {
     LOG_ERR(TAG, "Download failed: %s (%d)", entry.path.c_str(), static_cast<int>(result));
-    errorMessage_ = tr(STR_EBOOK_SYNC_DOWNLOAD_FAILED);
+    setDownloadErrorMessage(result, entry);
     return false;
   }
 
@@ -420,10 +498,18 @@ bool EbookSyncActivity::uploadNoteFile(const std::string& path, const std::strin
   while (f.available()) body.push_back(static_cast<char>(f.read()));
   f.close();
   body = noteUploadBody(filename, body);
+  lastNotesUploadBytes_ = body.size();
+
+  JsonDocument doc;
+  doc["source"] = "01_X4";
+  doc["filename"] = filename;
+  doc["content"] = body;
+  std::string jsonBody;
+  serializeJson(doc, jsonBody);
 
   const std::string url =
       std::string(X4_NOTES_UPLOAD_URL) + "?source=" + urlEncode("01_X4") + "&filename=" + urlEncode(filename);
-  const int code = postMarkdownDirect(url, filename, body);
+  const int code = postJsonDirect(url, jsonBody);
   lastNotesUploadCode_ = code;
   if (code < 200 || code >= 300) LOG_ERR(TAG, "Notes upload failed: %s HTTP %d", filename.c_str(), code);
   return code >= 200 && code < 300;
@@ -661,7 +747,21 @@ void EbookSyncActivity::render(RenderLock&&) {
   } else if (state_ == ERROR) {
     renderer.drawCenteredText(UI_10_FONT_ID, centerY - lineHeight, tr(STR_EBOOK_SYNC_FAILED), true,
                               EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing, errorMessage_.c_str());
+    if (lastDownloadCode_ != 0 && !lastDownloadName_.empty()) {
+      char diag[64];
+      snprintf(diag, sizeof(diag), "DL %s code=%d%s", lastDownloadIsCover_ ? "cover" : "book", lastDownloadCode_,
+               lastDownloadCode_ == static_cast<int>(HttpDownloader::STALLED) ? " STALL" : "");
+      char progress[64];
+      snprintf(progress, sizeof(progress), "%u/%u KB", static_cast<unsigned>(fileProgress_ / 1024),
+               static_cast<unsigned>(fileTotal_ / 1024));
+      const auto clipped = renderer.truncatedText(UI_10_FONT_ID, lastDownloadName_.c_str(), pageWidth - 40);
+      renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing, diag);
+      renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing + lineHeight, progress);
+      renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing + lineHeight * 2, clipped.c_str());
+    } else {
+      const auto clipped = renderer.truncatedText(UI_10_FONT_ID, errorMessage_.c_str(), pageWidth - 40);
+      renderer.drawCenteredText(UI_10_FONT_ID, centerY + metrics.verticalSpacing, clipped.c_str());
+    }
     GUI.drawButtonHints(renderer, tr(STR_BACK), "", "", "");
   }
 

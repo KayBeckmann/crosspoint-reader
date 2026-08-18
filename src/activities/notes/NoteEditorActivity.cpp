@@ -65,6 +65,25 @@ void NoteEditorActivity::setBleStatus(const char* prefix) {
   status_ = buf;
 }
 
+void NoteEditorActivity::setKeyStatus(const freeink::KeyEvent& ev) {
+  char buf[112];
+  snprintf(buf, sizeof(buf), "KEY k=%02X m=%02X BLE c=%d i=%d", static_cast<unsigned>(ev.keycode),
+           static_cast<unsigned>(ev.mods), BleHid.isConnected() ? 1 : 0, BleHid.isConnecting() ? 1 : 0);
+  status_ = buf;
+}
+
+bool NoteEditorActivity::isDuplicateKeyEvent(const freeink::KeyEvent& ev) {
+  const unsigned long now = millis();
+  if (ev.keycode != 0 && ev.keycode == lastEventKeycode_ && ev.mods == lastEventMods_ && now - lastEventMs_ < 220) {
+    lastEventMs_ = now;
+    return true;
+  }
+  lastEventKeycode_ = ev.keycode;
+  lastEventMods_ = ev.mods;
+  lastEventMs_ = now;
+  return false;
+}
+
 void NoteEditorActivity::requestBleReconnect(bool force) {
   if (!bleStarted_) return;
   BleHid.poll();
@@ -134,16 +153,66 @@ bool NoteEditorActivity::save() {
   return true;
 }
 
-void NoteEditorActivity::insertChar(char ch) {
+void NoteEditorActivity::insertByte(char ch) {
   if (text_.size() >= MAX_NOTE_BYTES) return;
   text_.insert(text_.begin() + std::min(cursor_, text_.size()), ch);
   cursor_++;
   dirty_ = true;
 }
 
+size_t NoteEditorActivity::currentLineStart() const {
+  const size_t pos = std::min(cursor_, text_.size());
+  const size_t prevNewline = text_.rfind('\n', pos == 0 ? 0 : pos - 1);
+  return prevNewline == std::string::npos ? 0 : prevNewline + 1;
+}
+
+size_t NoteEditorActivity::currentLineEnd() const {
+  const size_t nextNewline = text_.find('\n', std::min(cursor_, text_.size()));
+  return nextNewline == std::string::npos ? text_.size() : nextNewline;
+}
+
+bool NoteEditorActivity::shouldAutoWrapBefore(const char* s, const size_t len) const {
+  if (!s || len == 0 || s[0] == '\n') return false;
+  const size_t pos = std::min(cursor_, text_.size());
+  const size_t lineStart = currentLineStart();
+  const size_t lineEnd = currentLineEnd();
+  // Hard-wrap only while appending at the visual end of the current line. Cursor
+  // edits in the middle of an existing line should not unexpectedly reflow text.
+  if (pos != lineEnd || pos == lineStart) return false;
+
+  std::string candidate = text_.substr(lineStart, pos - lineStart);
+  candidate.append(s, len);
+  const int maxWidth = renderer.getScreenWidth() - 16;
+  return renderer.getTextWidth(UI_10_FONT_ID, candidate.c_str()) > maxWidth;
+}
+
+void NoteEditorActivity::insertUtf8Codepoint(const char* s, const size_t len) {
+  if (!s || len == 0) return;
+  if (text_.size() + len > MAX_NOTE_BYTES) return;
+  if (shouldAutoWrapBefore(s, len)) insertByte('\n');
+  for (size_t i = 0; i < len; ++i) insertByte(s[i]);
+}
+
 void NoteEditorActivity::insertText(const char* s) {
   if (!s) return;
-  while (*s) insertChar(*s++);
+  while (*s) {
+    const uint8_t lead = static_cast<uint8_t>(*s);
+    size_t len = 1;
+    if ((lead & 0xE0) == 0xC0)
+      len = 2;
+    else if ((lead & 0xF0) == 0xE0)
+      len = 3;
+    else if ((lead & 0xF8) == 0xF0)
+      len = 4;
+    for (size_t i = 1; i < len; ++i) {
+      if ((static_cast<uint8_t>(s[i]) & 0xC0) != 0x80) {
+        len = 1;
+        break;
+      }
+    }
+    insertUtf8Codepoint(s, len);
+    s += len;
+  }
 }
 
 const char* NoteEditorActivity::germanTextForKey(const freeink::KeyEvent& ev) const {
@@ -279,26 +348,27 @@ void NoteEditorActivity::moveCursorRight() {
 void NoteEditorActivity::handleBleKeys() {
   if (!bleStarted_) return;
   BleHid.poll();
-  if (!BleHid.isConnected()) requestBleReconnect(false);
-  if (BleHid.isConnected()) setBleStatus("BLE OK");
 
   freeink::KeyEvent ev;
   bool changed = false;
   while (BleHid.popKey(ev)) {
     if (!ev.pressed) continue;
+    if (isDuplicateKeyEvent(ev)) continue;
+    lastBleKeyMs_ = millis();
+    setKeyStatus(ev);
     if (const char* text = germanTextForKey(ev)) {
       insertText(text);
       changed = true;
       continue;
     }
     if (ev.ch) {
-      insertChar(ev.ch);
+      insertUtf8Codepoint(&ev.ch, 1);
       changed = true;
       continue;
     }
     switch (ev.special) {
       case freeink::SpecialKey::Enter:
-        insertChar('\n');
+        insertUtf8Codepoint("\n", 1);
         changed = true;
         break;
       case freeink::SpecialKey::Tab:
@@ -326,8 +396,18 @@ void NoteEditorActivity::handleBleKeys() {
     }
   }
   if (changed) {
-    status_ = tr(STR_NOTE_BLUETOOTH_CONNECTED);
     requestUpdate();
+    return;
+  }
+
+  // Do not immediately start/refresh a reconnect while keys just arrived: on the
+  // X4 a transient stale connected_ flag can coexist with queued reports. Rapid
+  // reconnect attempts during active typing caused visible `BLE CONN conn=0` and
+  // could duplicate reports. Let the link settle for a moment first.
+  if (!BleHid.isConnected()) {
+    if (millis() - lastBleKeyMs_ > 1500) requestBleReconnect(false);
+  } else {
+    setBleStatus("BLE OK");
   }
 }
 
