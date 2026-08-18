@@ -41,10 +41,11 @@ constexpr uint16_t kCharBootKbdInput = 0x2A22;
 constexpr uint16_t kCharReportMap = 0x2A4B;
 constexpr uint16_t kDescReportReference = 0x2908;
 
-// Page-turner remotes often stream a held key (or omit a clean release frame). If no
-// report arrives within this window, treat the key as released so one physical press
-// yields one event and the next press re-triggers.
-constexpr uint32_t kReleaseTimeoutMs = 150;
+// Consumer/page-turner remotes sometimes omit release frames. Age only the generic
+// remote edge state out; real keyboard reports carry explicit all-zero release frames,
+// so keeping prevKeys_ until a release prevents held-key repeat notifications from
+// becoming duplicate letters.
+constexpr uint32_t kReleaseTimeoutMs = 750;
 constexpr uint32_t kReconnectBackoffMs = 4000;
 constexpr uint32_t kConnectTimeoutMs = 8000;
 constexpr uint32_t kTeardownConnectWaitMs = kConnectTimeoutMs + 500;
@@ -75,6 +76,8 @@ bool g_hasKeyboardPage = false;
 bool g_hasConsumerPage = false;
 uint8_t g_preferredByteIndex = 0xFF;  // byte the report map suggests holds the code
 uint8_t g_lastGenericCode = 0;        // last non-zero code seen on the generic path
+uint8_t g_recentKeyboardMods = 0;      // short-lived modifier-only keyboard report cache
+uint32_t g_recentKeyboardModsMs = 0;
 volatile uint32_t g_lastReportMs = 0;  // millis() of the last HID notification (stale-release)
 
 BleKeyboardHost& self() { return BleKeyboardHost::getInstance(); }
@@ -270,12 +273,8 @@ void connTaskFn(void*) {
 }
 
 class ScanCB : public NimBLEScanCallbacks {
-  void onResult(const NimBLEAdvertisedDevice* dev) override {
+  static void ingestAdvertisement(const NimBLEAdvertisedDevice* dev, bool finalResult) {
     if (!dev) return;
-    // Store named/HID advertisers by default; optionally keep anonymous
-    // non-HID probe candidates during bring-up. HID is still validated at
-    // connect time. The name falls back to the address. Keep the callback cheap
-    // so heavy logging can't choke the C3's advertisement-report queue.
     const std::string a = dev->getAddress().toString();
     const bool named = dev->haveName();
     const std::string nm = named ? dev->getName() : a;
@@ -287,34 +286,24 @@ class ScanCB : public NimBLEScanCallbacks {
     const bool hid = dev->isAdvertisingService(NimBLEUUID(kHidService)) || keyboardAppearance;
 #if FREEINK_BLE_HID_SCAN_DEBUG
     if (named || hid || connectable) {
-      Serial.printf("[BLE adv] %s  name='%s'  rssi=%d  hid=%d  app=0x%04x  conn=%d  addrType=%u",
-                    a.c_str(), nm.c_str(), rssi, hid ? 1 : 0, appearance, connectable ? 1 : 0, type);
-#if CONFIG_BT_NIMBLE_EXT_ADV
-      Serial.printf("  legacy=%d  advType=0x%02x  data=%u  phy=%u/%u  len=%u", dev->isLegacyAdvertisement() ? 1 : 0,
-                    dev->getAdvType(), dev->getDataStatus(), dev->getPrimaryPhy(), dev->getSecondaryPhy(),
-                    dev->getAdvLength());
-#else
-      Serial.printf("  advType=0x%02x  len=%u", dev->getAdvType(), dev->getAdvLength());
-#endif
+      Serial.printf("[BLE adv%s] %s  name='%s'  rssi=%d  hid=%d  app=0x%04x  conn=%d  addrType=%u",
+                    finalResult ? " final" : " seen", a.c_str(), nm.c_str(), rssi, hid ? 1 : 0, appearance,
+                    connectable ? 1 : 0, type);
       printPayloadHex(dev);
       Serial.println();
     }
 #endif
     self().onScanResultIngest(a.c_str(), nm.c_str(), rssi, type, hid, connectable);
   }
+
+  void onDiscovered(const NimBLEAdvertisedDevice* dev) override { ingestAdvertisement(dev, false); }
+
+  void onResult(const NimBLEAdvertisedDevice* dev) override { ingestAdvertisement(dev, true); }
 };
 
 class ClientCB : public NimBLEClientCallbacks {
   void onDisconnect(NimBLEClient*, int) override { self().onLinkDown(); }
   void onPassKeyEntry(NimBLEConnInfo& connInfo) override { NimBLEDevice::injectPassKey(connInfo, 123456); }
-  uint32_t onPassKeyDisplay(NimBLEConnInfo&) override {
-    const uint32_t passkey = NimBLEDevice::getSecurityPasskey();
-    self().onPairingPasskey(passkey);
-#if FREEINK_BLE_HID_SCAN_DEBUG
-    Serial.printf("[BleHid] pairing passkey: %06lu\n", static_cast<unsigned long>(passkey));
-#endif
-    return passkey;
-  }
   void onConfirmPasskey(NimBLEConnInfo& connInfo, uint32_t) override {
     NimBLEDevice::injectConfirmPasskey(connInfo, true);
   }
@@ -362,15 +351,15 @@ bool BleKeyboardHost::begin(const char* hostName) {
   // back to the heap matters for the app (e.g. EPUB inflate windows).
   NimBLEDevice::setMTU(23);
 
-  // Bonding for HID remotes. Default to Just Works because page-turners commonly
-  // have no input/display capability; mandatory MITM makes those devices reject
-  // pairing. Firmware that specifically needs host-display keyboard pairing can
-  // opt in with FREEINK_BLE_HID_REQUIRE_MITM=1.
-  NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/FREEINK_BLE_HID_REQUIRE_MITM, /*sc=*/false);
-  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_DISPLAY_ONLY);
+  // Microslate-proven pairing baseline: Just Works with ENC-only key distribution.
+  // It works with keyboards that advertise no display/input capability and avoids
+  // MITM/passkey paths that caused unstable reconnects in testing.
+  NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/false, /*sc=*/false);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setSecurityPasskey(123456);
   NimBLEDevice::setSecurityInitKey(BLE_SM_PAIR_KEY_DIST_ENC);
   NimBLEDevice::setSecurityRespKey(BLE_SM_PAIR_KEY_DIST_ENC);
+  NimBLEDevice::setPower(-9);
 
   NimBLEScan* scan = NimBLEDevice::getScan();
   // wantDuplicates = true: DON'T filter duplicates. A device's name/HID often
@@ -380,20 +369,10 @@ bool BleKeyboardHost::begin(const char* hostName) {
   // below and the no-filter onResult) keeps scan response and extended adv data.
   scan->setScanCallbacks(&g_scanCb, true);
   scan->setActiveScan(true);  // send scan requests -> receive scan responses (names)
-  // CONTINUOUS listening (window == interval, 100% duty; values are ms).
-  // Extended advertising splits data into an AUX packet on a secondary
-  // channel that the controller must catch at a precise moment after the primary
-  // — if the scan window is closed when it lands, the name/HID UUID is lost. A
-  // windowed (low-duty) scan is fine for legacy keyboards but starves AUX
-  // reception, which is the only data this keyboard exposes. Duplicate filtering
-  // is OFF (above) so the AUX packet (same address as the primary) isn't dropped.
-  scan->setInterval(160);
-  scan->setWindow(160);
-#if CONFIG_BT_NIMBLE_EXT_ADV
-  // Some BLE 5.x peripherals advertise on LE Coded. Scan both PHYs so the pairing
-  // UI sees the same devices a desktop Bluetooth stack reports.
-  scan->setPhy(NimBLEScan::SCAN_ALL);
-#endif
+  // Microslate-proven X4 scan cadence. Active scan keeps names available while
+  // avoiding a permanent 100% scan window on the C3.
+  scan->setInterval(1349);
+  scan->setWindow(449);
 
   g_client = NimBLEDevice::createClient();
   if (!g_client) {
@@ -478,6 +457,8 @@ void BleKeyboardHost::end() {
   }
   g_connecting = false;
   g_lastGenericCode = 0;
+  g_recentKeyboardMods = 0;
+  g_recentKeyboardModsMs = 0;
   g_lastReportMs = 0;
 
   portENTER_CRITICAL(&g_mux);
@@ -497,19 +478,13 @@ void BleKeyboardHost::poll() {
   // Reflect the live scanner state.
   scanning_ = NimBLEDevice::getScan()->isScanning();
 
-  // Held-key release. Page-turner remotes stream a held key (and many omit a clean
-  // release frame), so we do NOT synthesize host-side auto-repeat — that turned one
-  // tap into dozens of page turns. Instead, when reports stop arriving, age the held
-  // key / last generic code out so one physical press == one event and the next press
-  // (even of the same button) re-triggers. Covers both the keyboard and generic paths.
-  portENTER_CRITICAL(&g_mux);
-  const uint8_t held = heldUsage_;
-  portEXIT_CRITICAL(&g_mux);
-  if ((held != 0 || g_lastGenericCode != 0) && (millis() - g_lastReportMs) > kReleaseTimeoutMs) {
-    portENTER_CRITICAL(&g_mux);
-    heldUsage_ = 0;
-    portEXIT_CRITICAL(&g_mux);
-    memset(prevKeys_, 0, sizeof(prevKeys_));
+  // Held-key release fallback. Keyboard reports are edge-detected against
+  // prevKeys_ and should reset that state only on an actual release frame in
+  // onReportIngest(). Do not clear prevKeys_ on a timer: some keyboards send held
+  // reports slowly, and timer-clearing turns those level reports into duplicate
+  // letters. The timeout is only for non-keyboard generic remotes without release
+  // frames, where g_lastGenericCode gates one physical press.
+  if (g_lastGenericCode != 0 && (millis() - g_lastReportMs) > kReleaseTimeoutMs) {
     g_lastGenericCode = 0;
   }
 
@@ -545,6 +520,7 @@ void BleKeyboardHost::startScan(uint32_t ms) {
   }
   portENTER_CRITICAL(&g_mux);
   deviceCount_ = 0;
+  scanDebug_ = ScanDebugStats{};
   portEXIT_CRITICAL(&g_mux);
   NimBLEScan* scan = NimBLEDevice::getScan();
   scan->clearResults();
@@ -572,6 +548,14 @@ void BleKeyboardHost::stopScan() {
 const DiscoveredDevice& BleKeyboardHost::device(uint8_t i) const {
   static const DiscoveredDevice kEmpty{};
   return i < deviceCount_ ? devices_[i] : kEmpty;
+}
+
+ScanDebugStats BleKeyboardHost::scanDebugStats() const {
+  ScanDebugStats out;
+  portENTER_CRITICAL(&g_mux);
+  out = scanDebug_;
+  portEXIT_CRITICAL(&g_mux);
+  return out;
 }
 
 void BleKeyboardHost::releaseScanResults() {
@@ -662,6 +646,8 @@ void BleKeyboardHost::enqueue(const KeyEvent& ev) {
 
 void BleKeyboardHost::emitUsage(uint8_t usage, uint8_t mods) {
   if (usage == 0) return;
+  lastKeycode_ = usage;
+  lastMods_ = mods;
   char ch;
   SpecialKey special;
   // Best-effort translation: known keyboard usages get a char / SpecialKey. Unknown
@@ -682,6 +668,20 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
   if (!data || len == 0) return;
   g_lastReportMs = millis();  // freshness for the stale-release timeout in poll()
 
+  // Some HID stacks/firmwares deliver the same input notification twice through
+  // adjacent report subscriptions. Treat byte-identical reports arriving almost
+  // immediately as one physical state change; release frames differ and still
+  // update prevKeys_, so a deliberate second press after release is unaffected.
+  static uint8_t lastReport[16] = {0};
+  static size_t lastReportLen = 0;
+  static uint32_t lastReportMs = 0;
+  const uint32_t nowReport = millis();
+  const size_t cmpLen = len < sizeof(lastReport) ? len : sizeof(lastReport);
+  if (cmpLen == lastReportLen && nowReport - lastReportMs < 80 && memcmp(lastReport, data, cmpLen) == 0) return;
+  memcpy(lastReport, data, cmpLen);
+  lastReportLen = cmpLen;
+  lastReportMs = nowReport;
+
 #if FREEINK_BLE_HID_REPORT_DEBUG
   {
     char buf[64];
@@ -694,11 +694,30 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
   }
 #endif
 
-  // Normalize: strip a leading report id (len 9). Boot/report-protocol keyboard
-  // reports are [mod][reserved][k0..k5] (8 bytes) or a compact [mod][k0..k5] (7).
+  // Normalize: strip a leading report id only when byte 0 actually looks
+  // like a report id. Boot/report-protocol keyboard reports are
+  // [mod][reserved][k0..k5] (8 bytes); some keyboards append one trailing byte
+  // (9 bytes) without a report id. Blindly stripping every 9-byte report drops
+  // the modifier byte, which makes Shift/AltGr disappear while letters still
+  // work.
   const uint8_t* p = data;
   size_t n = len;
-  if (n == 9) {
+  const auto looksLikeReportIdPrefix = [](const uint8_t* r, size_t l) -> bool {
+    if (l < 8 || r[0] == 0) return false;
+    // Ambiguous 9-byte reports from some keyboards are [mod][reserved][k0..k5][trailer].
+    // A Shift-only no-report-id frame looks like 02 00 00 00 00 00 00 00 00 and
+    // must NOT be stripped as report-id 2, otherwise the cached modifier is lost
+    // before the following key press arrives. If there is a non-zero key in byte
+    // 3..8, keep treating byte 0 as a report id so true report-id frames still work.
+    bool hasKeyAfterReportIdShape = false;
+    for (size_t i = 3; i < l; ++i) {
+      if (r[i] != 0 && r[i] != 0x01) hasKeyAfterReportIdShape = true;
+    }
+    if (r[1] == 0 && (r[2] == 0 || r[2] == 0x01) && !hasKeyAfterReportIdShape) return false;
+    const bool reservedLooksEmpty = r[2] == 0 || r[2] == 0x01;
+    return reservedLooksEmpty;
+  };
+  if (looksLikeReportIdPrefix(p, n)) {
     p += 1;
     n -= 1;
   }
@@ -719,10 +738,35 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
 
   bool emittedKb = false;
   if (keyboardShaped) {
+    // Some keyboards/report modes put modifier usages (0xE0..0xE7) in the key
+    // array instead of the boot-report modifier byte. Fold those slots back into
+    // mods before translating text, otherwise Shift can be physically held while
+    // emitted letters still look lowercase.
+    uint8_t effectiveMod = mod;
+    for (int i = 0; i < 6; ++i) {
+      const uint8_t k = keys[i];
+      if (k >= 0xE0 && k <= 0xE7) effectiveMod |= static_cast<uint8_t>(1u << (k - 0xE0));
+    }
+    bool hasTextKey = false;
+    for (int i = 0; i < 6; ++i) {
+      const uint8_t k = keys[i];
+      if (k != 0 && k != 0x01 && !(k >= 0xE0 && k <= 0xE7)) hasTextKey = true;
+    }
+    const uint32_t now = millis();
+    if (effectiveMod != 0) {
+      g_recentKeyboardMods = effectiveMod;
+      g_recentKeyboardModsMs = now;
+    } else if (hasTextKey && g_recentKeyboardMods != 0 && now - g_recentKeyboardModsMs < 800) {
+      effectiveMod = g_recentKeyboardMods;
+    } else if (!hasTextKey) {
+      g_recentKeyboardMods = 0;
+      g_recentKeyboardModsMs = 0;
+    }
+
     // Emit a press for every key newly present versus the previous report.
     for (int i = 0; i < 6; ++i) {
       const uint8_t k = keys[i];
-      if (k == 0 || k == 0x01 /*ErrorRollOver*/) continue;
+      if (k == 0 || k == 0x01 /*ErrorRollOver*/ || (k >= 0xE0 && k <= 0xE7)) continue;
       bool wasDown = false;
       for (int j = 0; j < 6; ++j) {
         if (prevKeys_[j] == k) {
@@ -731,7 +775,7 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
         }
       }
       if (!wasDown) {
-        emitUsage(k, mod);
+        emitUsage(k, effectiveMod);
         emittedKb = true;
       }
     }
@@ -739,14 +783,14 @@ void BleKeyboardHost::onReportIngest(const uint8_t* data, size_t len) {
     // Track the last held key for auto-repeat.
     uint8_t cur = 0;
     for (int i = 0; i < 6; ++i) {
-      if (keys[i] != 0 && keys[i] != 0x01) cur = keys[i];
+      if (keys[i] != 0 && keys[i] != 0x01 && !(keys[i] >= 0xE0 && keys[i] <= 0xE7)) cur = keys[i];
     }
     portENTER_CRITICAL(&g_mux);
     if (cur == 0) {
       heldUsage_ = 0;
     } else if (cur != heldUsage_) {
       heldUsage_ = cur;
-      heldMods_ = mod;
+      heldMods_ = effectiveMod;
       heldSince_ = millis();
       lastRepeat_ = millis();
     }
@@ -820,6 +864,21 @@ void BleKeyboardHost::onScanResultIngest(const char* addr, const char* name, int
   // A "real" name (not the address fallback) should never be downgraded back to
   // the address on a later primary-only advertisement.
   const bool realName = name && name[0] && strcmp(name, addr) != 0;
+  const bool accepted = realName || connectable || hid;
+  portENTER_CRITICAL(&g_mux);
+  scanDebug_.seen++;
+  strncpy(scanDebug_.lastAddr, addr, sizeof(scanDebug_.lastAddr) - 1);
+  scanDebug_.lastAddr[sizeof(scanDebug_.lastAddr) - 1] = '\0';
+  strncpy(scanDebug_.lastName, name && name[0] ? name : addr, sizeof(scanDebug_.lastName) - 1);
+  scanDebug_.lastName[sizeof(scanDebug_.lastName) - 1] = '\0';
+  scanDebug_.lastRssi = rssi;
+  scanDebug_.lastHid = hid;
+  scanDebug_.lastConnectable = connectable;
+  scanDebug_.lastAccepted = accepted;
+  if (accepted) scanDebug_.accepted++;
+  else scanDebug_.filtered++;
+  portEXIT_CRITICAL(&g_mux);
+  if (!accepted) return;
 #if !FREEINK_BLE_HID_SHOW_UNNAMED_DEVICES
   if (!realName && !hid) {
 #if FREEINK_BLE_HID_SCAN_DEBUG

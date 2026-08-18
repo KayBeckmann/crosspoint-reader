@@ -65,6 +65,18 @@ struct DiscoveredDevice {
   bool connectable = false;
 };
 
+struct ScanDebugStats {
+  uint32_t seen = 0;
+  uint32_t accepted = 0;
+  uint32_t filtered = 0;
+  char lastAddr[18] = {0};
+  char lastName[32] = {0};
+  int lastRssi = 0;
+  bool lastHid = false;
+  bool lastConnectable = false;
+  bool lastAccepted = false;
+};
+
 // A BLE HID peripheral the host has bonded with (persisted in NVS for auto-reconnect).
 struct PairedHidDevice {
   char addr[18] = {0};
@@ -108,6 +120,7 @@ class BleKeyboardHost {
   void stopScan();
   bool isScanning() const { return scanning_; }
   uint8_t deviceCount() const { return deviceCount_; }
+  ScanDebugStats scanDebugStats() const;
   const DiscoveredDevice& device(uint8_t i) const;
   // Free scan bookkeeping after connecting, to reclaim RAM while writing.
   void releaseScanResults();
@@ -122,6 +135,8 @@ class BleKeyboardHost {
   const char* connectedName() const { return connName_; }
   bool takeConnectFailure(char* out, size_t outLen);
   bool takePairingPasskey(uint32_t& out);
+  uint8_t lastKeycode() const { return lastKeycode_; }
+  uint8_t lastMods() const { return lastMods_; }
 
   // --- Pairings (persisted) --------------------------------------------------
   uint8_t pairedCount() const { return bondCount_; }
@@ -155,6 +170,7 @@ class BleKeyboardHost {
   // objects, spinlock, and connection task live file-static in the .cpp so this
   // header pulls in nothing.
   DiscoveredDevice devices_[kMaxDiscovered];
+  ScanDebugStats scanDebug_{};
   uint8_t deviceCount_ = 0;
   PairedHidDevice bonds_[kMaxBonds];
   uint8_t bondCount_ = 0;
@@ -179,6 +195,8 @@ class BleKeyboardHost {
   volatile uint32_t heldSince_ = 0;
   volatile uint32_t lastRepeat_ = 0;
   uint8_t prevKeys_[6] = {0};  // backend-task only
+  volatile uint8_t lastKeycode_ = 0;
+  volatile uint8_t lastMods_ = 0;
 };
 
 }  // namespace freeink
