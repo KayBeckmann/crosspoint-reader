@@ -6,11 +6,11 @@ Hardware-confirmed by Kay: X4 Notes writing works again, n8n stores notes into t
 
 ## Confirmed firmware artifact
 
-- File: `.pio/build/default/firmware-x4-notes-dupe220-stable-20260818-stable-d7b0bab.bin`
-- SHA256: `3ab28fb25d0d474cf5d00db0a30b00edf497bf8772630c14a9179ab1d0f94653`
+- File: `.pio/build/default/firmware-x4-notes-dupe220-stable-20260818-6193051.bin`
+- SHA256: `93e3a40ab8083acf86ed67485efeca6e3f3d9866b37a6a46088839e291dbbd37`
 - Size: `6,111,568 bytes`
 - Build verification: `pio run -e default` succeeded after commit.
-- Embedded version string verified with `strings`: `1.5.0-dev-feat/x4-microslate-ble-stack-d7b0bab`
+- Embedded version string verified with `strings`: `1.5.0-dev-feat/x4-microslate-ble-stack-6193051`
 - Hardware-confirmed predecessor artifact: `.pio/build/default/firmware-x4-rollback-keydiag-uploadjson-dupe220-20260818-070352.bin`, SHA256 `8591565ff113d8e1550cc3334026b3d9a6bc9eee18458eab886fbdd6ab9d131e`, size `6,111,584 bytes`, on-device note version `1.5.0-dev-feat/x4-microslate-ble-stack-a4c19ef`.
 
 ## Functional scope
