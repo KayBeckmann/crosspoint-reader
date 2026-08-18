@@ -157,7 +157,7 @@ void KeyboardEntryActivity::onEnter() {
 
 void KeyboardEntryActivity::onExit() {
   Activity::onExit();
-  if (bleStarted) {
+  if (bleStarted && !(completedSuccessfully && keepBleAliveOnComplete && BleHid.isConnected())) {
     BleHid.end();
     bleStarted = false;
     bleConnectIssued = false;
@@ -393,32 +393,57 @@ void KeyboardEntryActivity::ensureBleConnected() {
   if (BleHid.begin("CrossPoint X4")) {
     bleStarted = true;
     requestBleReconnect(true);
+  } else {
+    bleStatus = "BLE unavailable";
   }
 }
 
 void KeyboardEntryActivity::requestBleReconnect(bool force) {
   if (!bleStarted) return;
   BleHid.poll();
+  char buf[80];
   if (BleHid.isConnected()) {
     bleConnectIssued = false;
+    snprintf(buf, sizeof(buf), "BLE OK bonds=%u conn=1 ing=0", static_cast<unsigned>(BleHid.pairedCount()));
+    bleStatus = buf;
     return;
   }
-  if (BleHid.isConnecting() || BleHid.pairedCount() == 0) return;
+  if (BleHid.isConnecting()) {
+    snprintf(buf, sizeof(buf), "BLE CONN bonds=%u conn=0 ing=1", static_cast<unsigned>(BleHid.pairedCount()));
+    bleStatus = buf;
+    return;
+  }
+  char fail[48];
+  if (BleHid.takeConnectFailure(fail, sizeof(fail))) {
+    bleStatus = fail;
+    bleConnectIssued = false;
+  }
+  if (BleHid.pairedCount() == 0) {
+    bleStatus = "BLE NO BOND";
+    return;
+  }
   const unsigned long now = millis();
   if (!force && now - lastBleReconnectMs < 3000) return;
   lastBleReconnectMs = now;
   bleConnectIssued = BleHid.connect(BleHid.paired(0).addr);
+  snprintf(buf, sizeof(buf), "%s bonds=%u conn=0 ing=%d", bleConnectIssued ? "BLE TRY" : "BLE WAIT",
+           static_cast<unsigned>(BleHid.pairedCount()), BleHid.isConnecting() ? 1 : 0);
+  bleStatus = buf;
 }
 
 bool KeyboardEntryActivity::handleBleKeys() {
   if (!bleStarted) return false;
   BleHid.poll();
-  if (!BleHid.isConnected()) requestBleReconnect(false);
 
   freeink::KeyEvent ev;
   bool changed = false;
   while (BleHid.popKey(ev)) {
     if (!ev.pressed) continue;
+    lastBleKeyMs = millis();
+    char keyBuf[96];
+    snprintf(keyBuf, sizeof(keyBuf), "KEY k=%02X m=%02X BLE c=%d i=%d", static_cast<unsigned>(ev.keycode),
+             static_cast<unsigned>(ev.mods), BleHid.isConnected() ? 1 : 0, BleHid.isConnecting() ? 1 : 0);
+    bleStatus = keyBuf;
     if (const char* out = germanTextForKey(ev)) {
       insertUtf8(out);
       changed = true;
@@ -455,6 +480,13 @@ bool KeyboardEntryActivity::handleBleKeys() {
         return false;
       default:
         break;
+    }
+  }
+  if (!changed) {
+    if (!BleHid.isConnected()) {
+      if (millis() - lastBleKeyMs > 1500) requestBleReconnect(false);
+    } else {
+      requestBleReconnect(false);
     }
   }
   return changed;
@@ -1147,6 +1179,11 @@ void KeyboardEntryActivity::render(RenderLock&&) {
   props.bottomHitOverflow = static_cast<int16_t>(std::max(0, hintsTop - (kbRect.y + kbRect.height)));
   fui::keyboard(frame, kbRect, props);
   interactionsReady = true;
+
+  if (!bleStatus.empty()) {
+    auto st = renderer.truncatedText(SMALL_FONT_ID, bleStatus.c_str(), pageWidth - 16);
+    renderer.drawText(SMALL_FONT_ID, 8, renderer.getScreenHeight() - metrics.buttonHintsHeight - 14, st.c_str());
+  }
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);

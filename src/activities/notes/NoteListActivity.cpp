@@ -18,7 +18,7 @@
 namespace {
 constexpr const char* NOTES_DIR = "/Notes";
 constexpr size_t NAME_BUFFER_SIZE = 160;
-}
+}  // namespace
 
 void NoteListActivity::onEnter() {
   Activity::onEnter();
@@ -37,7 +37,8 @@ std::string NoteListActivity::normalizeNoteName(std::string name) {
   while (!name.empty() && (name.back() == ' ' || name.back() == '\t' || name.back() == '\r' || name.back() == '\n')) {
     name.pop_back();
   }
-  while (!name.empty() && (name.front() == ' ' || name.front() == '\t' || name.front() == '\r' || name.front() == '\n')) {
+  while (!name.empty() &&
+         (name.front() == ' ' || name.front() == '\t' || name.front() == '\r' || name.front() == '\n')) {
     name.erase(name.begin());
   }
   if (name.empty()) name = "Notiz";
@@ -72,28 +73,29 @@ void NoteListActivity::loadNotes() {
 
 void NoteListActivity::createNote() {
   inNameEntry_ = true;
-  startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_NAME), "", 96),
-                         [this](const ActivityResult& result) {
-                           inNameEntry_ = false;
-                           if (result.isCancelled) {
-                             requestUpdate();
-                             return;
-                           }
-                           std::string name = normalizeNoteName(std::get<KeyboardResult>(result.data).text);
-                           std::string path = notesPathForName(name);
-                           int suffix = 2;
-                           while (Storage.exists(path.c_str()) && suffix < 1000) {
-                             const auto base = name.substr(0, name.size() - 3);
-                             name = base + "-" + std::to_string(suffix++) + ".md";
-                             path = notesPathForName(name);
-                           }
-                           loadNotes();
-                           startActivityForResult(std::make_unique<NoteEditorActivity>(renderer, mappedInput, path, true),
-                                                  [this](const ActivityResult&) {
-                                                    loadNotes();
-                                                    requestUpdate();
-                                                  });
-                         });
+  startActivityForResult(
+      std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, tr(STR_NOTE_NAME), "", 96, InputType::Text, true),
+      [this](const ActivityResult& result) {
+        inNameEntry_ = false;
+        if (result.isCancelled) {
+          requestUpdate();
+          return;
+        }
+        std::string name = normalizeNoteName(std::get<KeyboardResult>(result.data).text);
+        std::string path = notesPathForName(name);
+        int suffix = 2;
+        while (Storage.exists(path.c_str()) && suffix < 1000) {
+          const auto base = name.substr(0, name.size() - 3);
+          name = base + "-" + std::to_string(suffix++) + ".md";
+          path = notesPathForName(name);
+        }
+        loadNotes();
+        startActivityForResult(std::make_unique<NoteEditorActivity>(renderer, mappedInput, path, true),
+                               [this](const ActivityResult&) {
+                                 loadNotes();
+                                 requestUpdate();
+                               });
+      });
 }
 
 void NoteListActivity::openSelected() {
@@ -138,14 +140,14 @@ void NoteListActivity::render(RenderLock&&) {
 
   const int listTop = metrics.topPadding + metrics.headerHeight + metrics.verticalSpacing;
   const int count = static_cast<int>(notes_.size()) + 1;
-  GUI.drawList(renderer,
-               Rect{0, listTop, width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing}, count,
-               selectedIndex_,
-               [this](int i) {
-                 if (i == 0) return std::string(tr(STR_NEW_NOTE));
-                 return notes_[i - 1];
-               },
-               nullptr, nullptr, nullptr, true);
+  GUI.drawList(
+      renderer, Rect{0, listTop, width, height - listTop - metrics.buttonHintsHeight - metrics.verticalSpacing}, count,
+      selectedIndex_,
+      [this](int i) {
+        if (i == 0) return std::string(tr(STR_NEW_NOTE));
+        return notes_[i - 1];
+      },
+      nullptr, nullptr, nullptr, true);
 
   const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
