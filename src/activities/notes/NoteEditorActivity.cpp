@@ -10,24 +10,86 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 #include "MappedInputManager.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 
+// Per-note-edit-session key-event log on SD (/notes-debug.log), independent of
+// a USB-Serial tether. Off by default; define FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG=1
+// in the firmware (e.g. via platformio.local.ini) to enable — useful for
+// diagnosing the wireless BLE keyboard without keeping a Serial monitor
+// connected at the same time.
+#ifndef FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+#define FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG 0
+#endif
+
 namespace {
 constexpr const char* TAG = "NOTE";
 constexpr unsigned long AUTOSAVE_MS = 2000;
 constexpr size_t MAX_NOTE_BYTES = 64 * 1024;
+#if FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+constexpr const char* KEY_LOG_PATH = "/notes-debug.log";
+#endif
+
+// Byte length of the UTF-8 codepoint starting at text[pos], clamped to 1 on
+// truncated/invalid sequences so callers always make forward progress.
+size_t utf8CodepointLengthAt(const std::string& text, const size_t pos) {
+  const uint8_t lead = static_cast<uint8_t>(text[pos]);
+  size_t len = 1;
+  if ((lead & 0xE0) == 0xC0)
+    len = 2;
+  else if ((lead & 0xF0) == 0xE0)
+    len = 3;
+  else if ((lead & 0xF8) == 0xF0)
+    len = 4;
+  if (pos + len > text.size()) return 1;
+  for (size_t i = 1; i < len; ++i) {
+    if ((static_cast<uint8_t>(text[pos + i]) & 0xC0) != 0x80) return 1;
+  }
+  return len;
+}
+
+// RAII helper for NoteEditorActivity::textMutex_. No-ops if the mutex failed
+// to allocate (LOG_ERR already reported that in onEnter()) so a degraded
+// unsynchronized mode is still usable rather than freezing the editor.
+class TextLock {
+ public:
+  explicit TextLock(SemaphoreHandle_t mutex) : mutex_(mutex) {
+    if (mutex_) xSemaphoreTake(mutex_, portMAX_DELAY);
+  }
+  ~TextLock() {
+    if (mutex_) xSemaphoreGive(mutex_);
+  }
+  TextLock(const TextLock&) = delete;
+  TextLock& operator=(const TextLock&) = delete;
+
+ private:
+  SemaphoreHandle_t mutex_;
+};
 }  // namespace
 
 void NoteEditorActivity::onEnter() {
   Activity::onEnter();
   load();
   cursor_ = text_.size();
+  textMutex_ = xSemaphoreCreateMutex();
+  if (!textMutex_) LOG_ERR(TAG, "Failed to create text mutex — text_/cursor_ access will be unsynchronized");
   ensureBleConnected();
   lastAutosaveMs_ = millis();
   if (status_.empty()) status_ = createdNow_ ? tr(STR_NOTE_CREATED) : tr(STR_NOTE_OPENED);
+#if FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+  keyLogFile_ = Storage.open(KEY_LOG_PATH, O_WRITE | O_CREAT | O_APPEND);
+  if (keyLogFile_) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "\n[%lu] === session start: %s ===\n", millis(), path_.c_str());
+    keyLogFile_.write(buf, strlen(buf));
+    keyLogFile_.flush();
+  } else {
+    LOG_ERR(TAG, "Failed to open %s for key logging", KEY_LOG_PATH);
+  }
+#endif
   requestUpdate();
 }
 
@@ -38,6 +100,18 @@ void NoteEditorActivity::onExit() {
     BleHid.end();
     bleStarted_ = false;
     bleConnectIssued_ = false;
+  }
+#if FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+  if (keyLogFile_) {
+    char buf[48];
+    snprintf(buf, sizeof(buf), "[%lu] === session end ===\n", millis());
+    keyLogFile_.write(buf, strlen(buf));
+    keyLogFile_.close();
+  }
+#endif
+  if (textMutex_) {
+    vSemaphoreDelete(textMutex_);
+    textMutex_ = nullptr;
   }
   powerLock_.reset();
 }
@@ -70,6 +144,16 @@ void NoteEditorActivity::setKeyStatus(const freeink::KeyEvent& ev) {
   snprintf(buf, sizeof(buf), "KEY k=%02X m=%02X BLE c=%d i=%d", static_cast<unsigned>(ev.keycode),
            static_cast<unsigned>(ev.mods), BleHid.isConnected() ? 1 : 0, BleHid.isConnecting() ? 1 : 0);
   status_ = buf;
+#if FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+  if (keyLogFile_) {
+    char line[128];
+    const int n = snprintf(line, sizeof(line), "[%lu] k=%02X m=%02X ch=%c special=%d pressed=%d\n", millis(),
+                           static_cast<unsigned>(ev.keycode), static_cast<unsigned>(ev.mods), ev.ch ? ev.ch : '.',
+                           static_cast<int>(ev.special), ev.pressed ? 1 : 0);
+    if (n > 0) keyLogFile_.write(line, static_cast<size_t>(n));
+    keyLogFile_.flush();
+  }
+#endif
 }
 
 bool NoteEditorActivity::isDuplicateKeyEvent(const freeink::KeyEvent& ev) {
@@ -103,16 +187,27 @@ void NoteEditorActivity::requestBleReconnect(bool force) {
     bleConnectIssued_ = false;
   }
 
-  if (BleHid.pairedCount() == 0) {
+  const uint8_t bonds = BleHid.pairedCount();
+  if (bonds == 0) {
     setBleStatus("BLE NO BOND");
     return;
   }
+  if (nextBleBondIndex_ >= bonds) nextBleBondIndex_ = 0;  // bond list shrank since last rotation
 
   const unsigned long now = millis();
   if (!force && now - lastBleReconnectMs_ < 3000) return;
   lastBleReconnectMs_ = now;
-  bleConnectIssued_ = BleHid.connect(BleHid.paired(0).addr);
-  setBleStatus(bleConnectIssued_ ? "BLE TRY" : "BLE WAIT");
+
+  // Rotate through every known bond instead of retrying slot 0 forever: a
+  // stale address there (e.g. left over from an earlier pairing) otherwise
+  // wedges reconnect permanently, which looks like the keyboard was never
+  // recognized even though it is bonded under a different slot.
+  const uint8_t tryIndex = nextBleBondIndex_;
+  nextBleBondIndex_ = static_cast<uint8_t>((tryIndex + 1) % bonds);
+  bleConnectIssued_ = BleHid.connect(BleHid.paired(tryIndex).addr);
+  char prefix[16];
+  snprintf(prefix, sizeof(prefix), "BLE TRY%u", static_cast<unsigned>(tryIndex));
+  setBleStatus(bleConnectIssued_ ? prefix : "BLE WAIT");
 }
 
 bool NoteEditorActivity::load() {
@@ -160,36 +255,17 @@ void NoteEditorActivity::insertByte(char ch) {
   dirty_ = true;
 }
 
-size_t NoteEditorActivity::currentLineStart() const {
-  const size_t pos = std::min(cursor_, text_.size());
-  const size_t prevNewline = text_.rfind('\n', pos == 0 ? 0 : pos - 1);
-  return prevNewline == std::string::npos ? 0 : prevNewline + 1;
-}
-
-size_t NoteEditorActivity::currentLineEnd() const {
-  const size_t nextNewline = text_.find('\n', std::min(cursor_, text_.size()));
-  return nextNewline == std::string::npos ? text_.size() : nextNewline;
-}
-
-bool NoteEditorActivity::shouldAutoWrapBefore(const char* s, const size_t len) const {
-  if (!s || len == 0 || s[0] == '\n') return false;
-  const size_t pos = std::min(cursor_, text_.size());
-  const size_t lineStart = currentLineStart();
-  const size_t lineEnd = currentLineEnd();
-  // Hard-wrap only while appending at the visual end of the current line. Cursor
-  // edits in the middle of an existing line should not unexpectedly reflow text.
-  if (pos != lineEnd || pos == lineStart) return false;
-
-  std::string candidate = text_.substr(lineStart, pos - lineStart);
-  candidate.append(s, len);
-  const int maxWidth = renderer.getScreenWidth() - 16;
-  return renderer.getTextWidth(UI_10_FONT_ID, candidate.c_str()) > maxWidth;
-}
-
 void NoteEditorActivity::insertUtf8Codepoint(const char* s, const size_t len) {
   if (!s || len == 0) return;
   if (text_.size() + len > MAX_NOTE_BYTES) return;
-  if (shouldAutoWrapBefore(s, len)) insertByte('\n');
+  // Line wrapping is purely visual (see wrapLines()) — only an explicit Enter
+  // stores a '\n'. This keeps saved notes free of wrap-position line breaks
+  // that would otherwise reflow oddly once edited on a different screen/font.
+  //
+  // textMutex_: text_/cursor_ are also read by visibleLines() on the render
+  // task. See the textMutex_ declaration in the header for why this is a
+  // dedicated, short-lived lock rather than RenderLock.
+  TextLock lock(textMutex_);
   for (size_t i = 0; i < len; ++i) insertByte(s[i]);
 }
 
@@ -332,22 +408,48 @@ const char* NoteEditorActivity::germanTextForKey(const freeink::KeyEvent& ev) co
 
 void NoteEditorActivity::backspace() {
   if (cursor_ == 0 || text_.empty()) return;
+  TextLock lock(textMutex_);  // see insertUtf8Codepoint() for why text_/cursor_ mutation is locked
   text_.erase(text_.begin() + cursor_ - 1);
   cursor_--;
   dirty_ = true;
 }
 
 void NoteEditorActivity::moveCursorLeft() {
-  if (cursor_ > 0) cursor_--;
+  if (cursor_ == 0) return;
+  TextLock lock(textMutex_);
+  cursor_--;
 }
 
 void NoteEditorActivity::moveCursorRight() {
-  if (cursor_ < text_.size()) cursor_++;
+  if (cursor_ >= text_.size()) return;
+  TextLock lock(textMutex_);
+  cursor_++;
 }
 
 void NoteEditorActivity::handleBleKeys() {
   if (!bleStarted_) return;
   BleHid.poll();
+
+#if FREEINK_NOTE_EDITOR_KEY_LOG_DEBUG
+  // Raw report bytes, captured before report-id stripping/dedup/mod-folding —
+  // lets Shift/AltGr decode bugs be diagnosed from the SD log alone, without a
+  // USB-Serial monitor. Drained first so a report's raw line precedes the
+  // KeyEvent(s) it produced.
+  if (keyLogFile_) {
+    freeink::RawReport raw;
+    while (BleHid.popRawReport(raw)) {
+      char line[96];
+      size_t off = static_cast<size_t>(
+          snprintf(line, sizeof(line), "[%lu] RAW len=%u:", static_cast<unsigned long>(raw.ms), raw.len));
+      for (uint8_t i = 0; i < raw.len && off + 3 < sizeof(line); ++i) {
+        off += static_cast<size_t>(snprintf(line + off, sizeof(line) - off, " %02X", raw.data[i]));
+      }
+      if (off + 1 < sizeof(line)) line[off++] = '\n';
+      keyLogFile_.write(line, off);
+    }
+    keyLogFile_.flush();
+  }
+#endif
 
   freeink::KeyEvent ev;
   bool changed = false;
@@ -436,36 +538,69 @@ void NoteEditorActivity::loop() {
   }
 }
 
-std::vector<std::string> NoteEditorActivity::visibleLines(int maxLines) const {
-  std::vector<std::string> lines;
-  lines.reserve(maxLines);
-  size_t start = 0;
+std::vector<NoteEditorActivity::LineRange> NoteEditorActivity::wrapLines(const std::string& text) const {
+  std::vector<LineRange> lines;
+  const int maxWidth = renderer.getScreenWidth() - 16;
+  const size_t n = text.size();
   size_t lineStart = 0;
-  size_t currentLine = 0;
-  for (size_t i = 0; i <= text_.size(); ++i) {
-    if (i == text_.size() || text_[i] == '\n') {
-      if (cursor_ >= lineStart && cursor_ <= i) {
-        start = currentLine > static_cast<size_t>(maxLines / 2) ? currentLine - maxLines / 2 : 0;
-      }
+  std::string candidate;  // reused across iterations to avoid per-codepoint heap churn
+  size_t i = 0;
+  while (i <= n) {
+    if (i == n || text[i] == '\n') {
+      lines.push_back({lineStart, i});
       lineStart = i + 1;
-      currentLine++;
+      candidate.clear();
+      ++i;
+      continue;
     }
+    const size_t len = utf8CodepointLengthAt(text, i);
+    // Never break an empty line: a single codepoint wider than the screen
+    // must still land somewhere instead of wrapping forever without progress.
+    if (i > lineStart) {
+      candidate.append(text, i, len);
+      if (renderer.getTextWidth(UI_10_FONT_ID, candidate.c_str()) > maxWidth) {
+        lines.push_back({lineStart, i});
+        lineStart = i;
+        candidate.assign(text, i, len);
+      }
+    } else {
+      candidate.assign(text, i, len);
+    }
+    i += len;
+  }
+  return lines;
+}
+
+std::vector<std::string> NoteEditorActivity::visibleLines(int maxLines) const {
+  // Snapshot text_/cursor_ under the lock — a plain copy, not the expensive
+  // per-codepoint wrapLines() below, so the main task is only ever blocked
+  // for as long as a copy of the note takes, never for a whole render pass.
+  // See the textMutex_ declaration in the header for why this matters.
+  std::string textSnapshot;
+  size_t cursorSnapshot;
+  {
+    TextLock lock(textMutex_);
+    textSnapshot = text_;
+    cursorSnapshot = cursor_;
   }
 
-  currentLine = 0;
-  lineStart = 0;
-  for (size_t i = 0; i <= text_.size(); ++i) {
-    if (i == text_.size() || text_[i] == '\n') {
-      if (currentLine >= start && lines.size() < static_cast<size_t>(maxLines)) {
-        std::string line = text_.substr(lineStart, i - lineStart);
-        if (cursor_ >= lineStart && cursor_ <= i) {
-          line.insert(cursor_ - lineStart, "|");
-        }
-        lines.push_back(std::move(line));
-      }
-      lineStart = i + 1;
-      currentLine++;
-    }
+  const auto ranges = wrapLines(textSnapshot);
+  std::vector<std::string> lines;
+  lines.reserve(std::min<size_t>(ranges.size(), static_cast<size_t>(maxLines)));
+
+  // Ties at a wrap boundary (cursor == both a line's end and the next line's
+  // start) resolve to the later line, matching how the cursor visually moves
+  // onto the new line as soon as typing crosses the wrap point.
+  size_t cursorLine = 0;
+  for (size_t idx = 0; idx < ranges.size(); ++idx) {
+    if (cursorSnapshot >= ranges[idx].start && cursorSnapshot <= ranges[idx].end) cursorLine = idx;
+  }
+  const size_t start = cursorLine > static_cast<size_t>(maxLines / 2) ? cursorLine - maxLines / 2 : 0;
+
+  for (size_t idx = start; idx < ranges.size() && lines.size() < static_cast<size_t>(maxLines); ++idx) {
+    std::string line = textSnapshot.substr(ranges[idx].start, ranges[idx].end - ranges[idx].start);
+    if (idx == cursorLine) line.insert(cursorSnapshot - ranges[idx].start, "|");
+    lines.push_back(std::move(line));
   }
   if (lines.empty()) lines.push_back("|");
   return lines;
